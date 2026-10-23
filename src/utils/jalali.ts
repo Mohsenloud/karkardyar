@@ -225,7 +225,7 @@ export function toEnglishDigits(str: string): string {
 export function formatToman(amount: number | null | undefined): string {
   if (amount === null || amount === undefined || isNaN(amount)) return '۰';
   const rounded = Math.round(amount);
-  const formatted = Math.abs(rounded).toLocaleString('en-US');
+  const formatted = Math.abs(rounded).toLocaleString('en-US').replace(/,/g, '٬');
   const sign = rounded < 0 ? '-' : '';
   return toPersianDigits(sign + formatted);
 }

@@ -36,6 +36,7 @@ import {
   toPersianDigits,
 } from '../utils/jalali';
 import { downloadPayslipPdf, printPayslipDocument } from '../utils/payslipExport';
+import { getProjectTheme } from '../utils/projectThemes';
 
 // Distinct vibrant light themes per worker card for a lively, modern mobile UI
 const WORKER_LIGHT_THEMES = [
@@ -82,6 +83,8 @@ const WORKER_LIGHT_THEMES = [
 ];
 
 interface MonthlySheetViewProps {
+  activeProjectName?: string;
+  activeProjectColor?: string;
   shamsiYear: number;
   shamsiMonth: number;
   onChangeMonth: (year: number, month: number) => void;
@@ -109,18 +112,29 @@ interface MonthlySheetViewProps {
       auto_count_days: number;
     }
   ) => void;
-  onQuickSettleWorker: (worker: Worker, amount: number) => void;
+  onQuickSettleWorker: (
+    worker: Worker,
+    amount: number,
+    paymentType?: 'advance' | 'salary' | 'deduction',
+    note?: string,
+    paymentDateIso?: string
+  ) => void;
+  onOpenWorkersTab?: () => void;
 }
 
 export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
+  activeProjectName = 'همه پروژه‌ها',
+  activeProjectColor = 'emerald',
   workers,
   accruedSummaries,
   payments,
   onSaveDailyLog,
   onSaveWorkerRangeAndDays,
   onQuickSettleWorker,
+  onOpenWorkersTab,
 }) => {
   const todayIso = getTodayIso();
+  const activeProjTheme = getProjectTheme(activeProjectColor);
 
   const [editingWorkerId, setEditingWorkerId] = useState<number | null>(null);
   const [openCalendarWorkerId, setOpenCalendarWorkerId] = useState<number | null>(
@@ -143,6 +157,31 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
   const [payslipWorkerId, setPayslipWorkerId] = useState<number | null>(null);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState<boolean>(false);
+
+  // Advance & Settlement Modal State (پنجره مساعده و تسویه)
+  const [settleModalWorkerId, setSettleModalWorkerId] = useState<number | null>(null);
+  const [settleType, setSettleType] = useState<'advance' | 'salary' | 'deduction'>('salary');
+  const [settleAmountInput, setSettleAmountInput] = useState<string>('');
+  const [settleNoteInput, setSettleNoteInput] = useState<string>('');
+  const [settleJy, setSettleJy] = useState<number>(1405);
+  const [settleJm, setSettleJm] = useState<number>(7);
+  const [settleJd, setSettleJd] = useState<number>(1);
+
+  const openSettleModal = (w: Worker, acc: AccruedToTodaySummary) => {
+    const shToday = isoToShamsi(todayIso);
+    setSettleJy(shToday.jy);
+    setSettleJm(shToday.jm);
+    setSettleJd(shToday.jd);
+    setSettleModalWorkerId(w.id);
+    if (acc.netPayableToToday > 0) {
+      setSettleType('salary');
+      setSettleAmountInput(String(acc.netPayableToToday));
+    } else {
+      setSettleType('advance');
+      setSettleAmountInput('');
+    }
+    setSettleNoteInput('');
+  };
 
   const openRangeAndDaysEditor = (w: Worker) => {
     const shStart = isoToShamsi(w.start_date || todayIso);
@@ -317,14 +356,22 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   const selectedPayslipAccrued = accruedSummaries.find((a) => a.workerId === payslipWorkerId);
   const selectedPayslipPayments = payments.filter((p) => p.worker_id === payslipWorkerId);
 
+  const settleModalWorker = workers.find((w) => w.id === settleModalWorkerId);
+  const settleModalAccrued = accruedSummaries.find((a) => a.workerId === settleModalWorkerId);
+
   return (
     <div className="space-y-3.5">
-      {/* Top Overview Card - Compact & Vibrant */}
-      <section className="bg-gradient-to-br from-emerald-600 via-teal-600 to-cyan-700 text-white rounded-2xl p-3.5 sm:p-4 shadow-sm shadow-teal-900/10">
+      {/* Top Overview Card - Dynamic Project Color & Modern Glass */}
+      <section className={`${activeProjTheme.heroBanner} text-white rounded-3xl p-4 sm:p-4.5 transition-all`}>
         <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/15">
-          <h2 className="text-xs sm:text-sm font-extrabold text-white">
-            خلاصه کل کارکرد تا امروز ({formatShamsiDayMonth(todayIso)})
-          </h2>
+          <div>
+            <h2 className="text-xs sm:text-sm font-extrabold text-white">
+              حساب و کارکرد «{activeProjectName}» تا امروز ({formatShamsiDayMonth(todayIso)})
+            </h2>
+            <p className="text-[10px] text-white/85 mt-0.5 font-mono-num">
+              تعداد کارگران این بخش: {toPersianDigits(workers.length)} نفر
+            </p>
+          </div>
           <button
             type="button"
             onClick={handleExportCsv}
@@ -370,6 +417,24 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
         </div>
       </section>
 
+      {workers.length === 0 ? (
+        <div className="bg-white border border-emerald-100 rounded-2xl p-6 text-center space-y-3 shadow-2xs">
+          <p className="text-xs sm:text-sm font-bold text-slate-700">
+            هنوز هیچ کارگری در «{activeProjectName}» ثبت نشده است.
+          </p>
+          {onOpenWorkersTab && (
+            <button
+              type="button"
+              onClick={onOpenWorkersTab}
+              className="w-fit h-9 px-4 rounded-xl bg-gradient-to-l from-emerald-500 to-teal-600 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>افزودن کارگر به «{activeProjectName}»</span>
+            </button>
+          )}
+        </div>
+      ) : null}
+
       {/* Worker Cards — Compact 2-Column Grid on Desktop, Neat Single Column on Mobile */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-start">
         {workers.map((worker, index) => {
@@ -397,9 +462,27 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     {worker.name.trim().charAt(0)}
                   </div>
                   <div className="min-w-0">
-                    <h3 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
-                      {worker.name}
-                    </h3>
+                    <div className="flex items-center gap-1.5">
+                      <h3 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
+                        {worker.name}
+                      </h3>
+                      {worker.project_name && (
+                        <span
+                          className={`w-fit px-2 py-0.5 rounded-md border text-[9px] font-extrabold inline-flex items-center gap-1 shrink-0 ${
+                            getProjectTheme(worker.project_color, (worker.project_id || 1) - 1)
+                              .badgeClass
+                          }`}
+                        >
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${
+                              getProjectTheme(worker.project_color, (worker.project_id || 1) - 1)
+                                .dotClass
+                            }`}
+                          />
+                          <span>{worker.project_name}</span>
+                        </span>
+                      )}
+                    </div>
                     <div className="text-[11px] text-slate-600 font-mono-num truncate">
                       {worker.role} ·{' '}
                       {worker.wage_type === 'daily'
@@ -557,16 +640,14 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   </button>
                 </div>
 
-                {acc.netPayableToToday > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => onQuickSettleWorker(worker, acc.netPayableToToday)}
-                    className="w-fit h-8 px-3 rounded-lg bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 active:scale-95 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap shadow-2xs"
-                  >
-                    <CheckCircle2 className="w-3 h-3 shrink-0" />
-                    <span>تسویه مانده</span>
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => openSettleModal(worker, acc)}
+                  className="w-fit h-8 px-3 rounded-lg bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 active:scale-95 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap shadow-2xs"
+                >
+                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                  <span>تسویه مانده</span>
+                </button>
               </div>
 
               {/* Collapsible Interactive Calendar Strip — Compact Fixed-Size Squares (Not Stretched) */}
@@ -1081,6 +1162,278 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Separate Modal Window for Advance & Settlement (پنجره مساعده و تسویه) */}
+      {settleModalWorker && settleModalAccrued && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+          onClick={() => setSettleModalWorkerId(null)}
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const numericAmount = Number(settleAmountInput);
+              if (!numericAmount || numericAmount <= 0) return;
+              const maxD = getShamsiMonthLength(settleJy, settleJm);
+              const paymentDateIso = shamsiToIso(
+                settleJy,
+                settleJm,
+                Math.min(settleJd, maxD)
+              );
+              onQuickSettleWorker(
+                settleModalWorker,
+                numericAmount,
+                settleType,
+                settleNoteInput,
+                paymentDateIso
+              );
+              setSettleModalWorkerId(null);
+            }}
+            className="bg-white border border-emerald-100 rounded-2xl max-w-md w-full overflow-hidden shadow-2xl space-y-3.5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="bg-gradient-to-br from-emerald-600 via-teal-600 to-cyan-700 text-white p-3.5 sm:p-4 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm sm:text-base font-extrabold text-white">
+                  ثبت مساعده و تسویه — {settleModalWorker.name}
+                </h3>
+                <p className="text-[11px] text-emerald-100 mt-0.5 font-mono-num">
+                  {settleModalWorker.project_name
+                    ? `${settleModalWorker.project_name} · `
+                    : ''}
+                  {settleModalWorker.role}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSettleModalWorkerId(null)}
+                className="w-8 h-8 rounded-lg bg-white/15 hover:bg-white/25 border border-white/20 flex items-center justify-center text-white shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-4 pb-4 space-y-3 font-mono-num">
+              {/* Worker Financial Summary Strip */}
+              <div className="grid grid-cols-3 gap-1.5 text-center bg-slate-50 border border-slate-200/80 rounded-xl p-2">
+                <div>
+                  <span className="text-[9px] text-slate-500 block">کل کارکرد</span>
+                  <span className="text-[11px] font-extrabold text-slate-800 mt-0.5 block">
+                    {formatToman(settleModalAccrued.grossEarnedToToday)} ت
+                  </span>
+                </div>
+                <div>
+                  <span className="text-[9px] text-slate-500 block">دریافتی قبلی</span>
+                  <span className="text-[11px] font-extrabold text-amber-700 mt-0.5 block">
+                    {formatToman(settleModalAccrued.paidToToday)} ت
+                  </span>
+                </div>
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg py-0.5">
+                  <span className="text-[9px] text-emerald-800 font-bold block">
+                    مانده قابل پرداخت
+                  </span>
+                  <span className="text-[11px] font-extrabold text-emerald-700 mt-0.5 block">
+                    {formatToman(settleModalAccrued.netPayableToToday)} ت
+                  </span>
+                </div>
+              </div>
+
+              {/* Payment Type Selection: Advance (علی‌الحساب) vs Settlement (تسویه) */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  نوع پرداخت را انتخاب کنید:
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSettleType('advance')}
+                    className={`h-9 rounded-xl text-xs font-extrabold border transition-all ${
+                      settleType === 'advance'
+                        ? 'bg-gradient-to-l from-amber-500 to-orange-500 text-white border-amber-500 shadow-2xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    علی‌الحساب (مساعده)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSettleType('salary');
+                      if (settleModalAccrued.netPayableToToday > 0 && !settleAmountInput) {
+                        setSettleAmountInput(String(settleModalAccrued.netPayableToToday));
+                      }
+                    }}
+                    className={`h-9 rounded-xl text-xs font-extrabold border transition-all ${
+                      settleType === 'salary'
+                        ? 'bg-gradient-to-l from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-2xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    تسویه کارکرد
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSettleType('deduction')}
+                    className={`h-9 rounded-xl text-xs font-extrabold border transition-all ${
+                      settleType === 'deduction'
+                        ? 'bg-gradient-to-l from-rose-500 to-red-600 text-white border-rose-600 shadow-2xs'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    کسر / خسارت
+                  </button>
+                </div>
+              </div>
+
+              {/* Payment Date Selector (تاریخ ثبت مساعده / تسویه) */}
+              <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200/90 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700 inline-flex items-center gap-1">
+                    <Calendar className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>تاریخ پرداخت</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const shToday = isoToShamsi(todayIso);
+                      setSettleJy(shToday.jy);
+                      setSettleJm(shToday.jm);
+                      setSettleJd(shToday.jd);
+                    }}
+                    className="w-fit px-2 py-0.5 rounded-md bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-[10px] font-bold transition-colors"
+                  >
+                    امروز ({formatShamsiDayMonth(todayIso)})
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <select
+                    value={settleJd}
+                    onChange={(e) => setSettleJd(Number(e.target.value))}
+                    className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+                  >
+                    {Array.from(
+                      { length: getShamsiMonthLength(settleJy, settleJm) },
+                      (_, i) => i + 1
+                    ).map((d) => (
+                      <option key={d} value={d}>
+                        روز {toPersianDigits(d)}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={settleJm}
+                    onChange={(e) => setSettleJm(Number(e.target.value))}
+                    className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+                  >
+                    {PERSIAN_MONTHS.map((m, idx) => (
+                      <option key={m} value={idx + 1}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={settleJy}
+                    onChange={(e) => setSettleJy(Number(e.target.value))}
+                    className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+                  >
+                    {[1403, 1404, 1405, 1406, 1407].map((y) => (
+                      <option key={y} value={y}>
+                        {toPersianDigits(y)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Amount Input + Quick Fill Buttons */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-bold text-slate-700">مبلغ (تومان) *</label>
+                  {settleAmountInput && Number(settleAmountInput) > 0 && (
+                    <span className="text-xs font-extrabold text-emerald-700">
+                      {formatToman(Number(settleAmountInput))} تومان
+                    </span>
+                  )}
+                </div>
+                <input
+                  type="number"
+                  step="50000"
+                  min="1000"
+                  value={settleAmountInput}
+                  onChange={(e) => setSettleAmountInput(e.target.value)}
+                  placeholder="مبلغ را وارد کنید..."
+                  className="w-full h-10 px-3 rounded-xl border border-slate-300 text-sm font-bold focus:outline-none focus:border-emerald-600"
+                  required
+                />
+
+                {/* Quick Presets + Full Remaining Balance Button */}
+                <div className="flex flex-wrap items-center gap-1.5 mt-2">
+                  {settleModalAccrued.netPayableToToday > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSettleAmountInput(String(settleModalAccrued.netPayableToToday))
+                      }
+                      className="w-fit px-2.5 py-1 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-900 text-[10px] font-extrabold transition-colors"
+                    >
+                      کل مانده ({formatToman(settleModalAccrued.netPayableToToday)} ت)
+                    </button>
+                  )}
+                  {[500000, 1000000, 2000000, 5000000].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setSettleAmountInput(String(preset))}
+                      className="w-fit px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] font-bold transition-colors"
+                    >
+                      {formatToman(preset)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Optional Note */}
+              <div>
+                <label className="block text-xs font-medium text-slate-700 mb-1">
+                  توضیحات (کارت به کارت، نقدی، شماره پیگیری...)
+                </label>
+                <input
+                  type="text"
+                  value={settleNoteInput}
+                  onChange={(e) => setSettleNoteInput(e.target.value)}
+                  placeholder="مثلاً: واریز کارت به کارت علی‌الحساب"
+                  className="w-full h-9 px-3 rounded-xl border border-slate-300 text-xs focus:outline-none focus:border-emerald-600"
+                />
+              </div>
+
+              {/* Footer Buttons */}
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setSettleModalWorkerId(null)}
+                  className="w-fit h-9 px-3.5 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  className="w-fit h-9 px-4 rounded-xl bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 shadow-xs shadow-emerald-600/20"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>
+                    {settleType === 'advance'
+                      ? 'ثبت مساعده (علی‌الحساب)'
+                      : settleType === 'salary'
+                      ? 'ثبت تسویه کارکرد'
+                      : 'ثبت کسر از حساب'}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </form>
         </div>
       )}
     </div>

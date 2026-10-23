@@ -12,7 +12,7 @@ import {
   Check,
   X,
 } from 'lucide-react';
-import { CalcMode, Worker } from '../types';
+import { CalcMode, Project, Worker } from '../types';
 import {
   PERSIAN_MONTHS,
   formatShamsiDayMonth,
@@ -53,11 +53,14 @@ const WORKER_LIGHT_THEMES = [
 ];
 
 interface WorkersViewProps {
+  projects: Project[];
+  selectedProjectId: number | 'all';
   workers: Worker[];
   dbFileSizeKb: number;
   onSaveWorker: (
     payload: {
       id?: number;
+      project_id: number;
       name: string;
       role: string;
       phone: string;
@@ -80,6 +83,8 @@ interface WorkersViewProps {
 }
 
 export const WorkersView: React.FC<WorkersViewProps> = ({
+  projects,
+  selectedProjectId,
   workers,
   dbFileSizeKb,
   onSaveWorker,
@@ -89,9 +94,20 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
   const todayIso = getTodayIso();
   const todayShamsi = isoToShamsi(todayIso);
 
+  const defaultProjectId =
+    selectedProjectId !== 'all' ? selectedProjectId : projects[0]?.id ?? 1;
+
   const [showWorkersListModal, setShowWorkersListModal] = useState(false);
 
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [workerProjectId, setWorkerProjectId] = useState<number>(defaultProjectId);
+
+  React.useEffect(() => {
+    if (!editingId) {
+      setWorkerProjectId(defaultProjectId);
+    }
+  }, [defaultProjectId, editingId]);
+
   const [name, setName] = useState('');
   const [role, setRole] = useState('کارگر');
   const [phone, setPhone] = useState('');
@@ -119,6 +135,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
 
   const resetForm = () => {
     setEditingId(null);
+    setWorkerProjectId(defaultProjectId);
     setName('');
     setRole('کارگر');
     setPhone('');
@@ -140,6 +157,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
 
   const handleEdit = (w: Worker) => {
     setEditingId(w.id);
+    setWorkerProjectId(w.project_id || defaultProjectId);
     setName(w.name);
     setRole(w.role);
     setPhone(w.phone || '');
@@ -188,6 +206,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
 
     await onSaveWorker({
       id: editingId ?? undefined,
+      project_id: workerProjectId || defaultProjectId,
       name: name.trim(),
       role: role.trim() || 'کارگر',
       phone: phone.trim(),
@@ -260,7 +279,23 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
+              پروژه مربوطه *
+            </label>
+            <select
+              value={workerProjectId}
+              onChange={(e) => setWorkerProjectId(Number(e.target.value))}
+              className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-emerald-800 focus:outline-none focus:border-emerald-600"
+            >
+              {projects.map((pr) => (
+                <option key={pr.id} value={pr.id}>
+                  {pr.name}
+                </option>
+              ))}
+            </select>
+          </div>
           <div>
             <label className="block text-xs font-medium text-slate-700 mb-1">
               نام و نام خانوادگی *
@@ -629,10 +664,15 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
                           {w.name.trim().charAt(0)}
                         </div>
                         <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
                             <span className="text-sm font-extrabold text-slate-900 truncate">
                               {w.name}
                             </span>
+                            {w.project_name && (
+                              <span className="w-fit px-1.5 py-0.5 rounded-md bg-white/90 border border-slate-200 text-[9px] font-bold text-slate-700">
+                                {w.project_name}
+                              </span>
+                            )}
                             <span className="text-[11px] text-slate-500">
                               · {w.role} {w.active === 0 ? '(غیرفعال)' : ''}
                             </span>

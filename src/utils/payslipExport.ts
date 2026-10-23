@@ -189,7 +189,8 @@ export async function downloadPayslipPdf(data: PayslipExportData): Promise<void>
     worker.wage_type === 'daily'
       ? `روزمزد: ${formatToman(worker.base_wage)} تومان`
       : `ماهانه: ${formatToman(worker.base_wage)} تومان`;
-  ctx.fillText(`سمت: ${worker.role}   |   ${wageTypeText}`, width - 105, 178);
+  const projText = worker.project_name ? `پروژه: ${worker.project_name}   |   ` : '';
+  ctx.fillText(`${projText}سمت: ${worker.role}   |   ${wageTypeText}`, width - 105, 178);
 
   // Issue Date (Left aligned in Header)
   ctx.textAlign = 'left';
@@ -552,7 +553,7 @@ export function printPayslipDocument(data: PayslipExportData): void {
     <div class="header">
       <div>
         <h1>صورت‌حساب کارکرد — ${worker.name}</h1>
-        <p>سمت: ${worker.role} | ${wageTypeText}</p>
+        <p>${worker.project_name ? `پروژه: ${worker.project_name} | ` : ''}سمت: ${worker.role} | ${wageTypeText}</p>
       </div>
       <div style="text-align:left; font-size:12px;">
         <div>تاریخ گزارش: ${formatShamsiDayMonth(todayIso, true)}</div>

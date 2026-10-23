@@ -17,8 +17,18 @@ db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
 
+  CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    color TEXT DEFAULT 'emerald',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+
   CREATE TABLE IF NOT EXISTS workers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL DEFAULT 1,
     name TEXT NOT NULL,
     role TEXT DEFAULT 'کارگر',
     phone TEXT DEFAULT '',
@@ -69,6 +79,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS payments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL DEFAULT 1,
     worker_id INTEGER NOT NULL,
     payment_date TEXT NOT NULL,
     shamsi_year INTEGER NOT NULL,
@@ -109,6 +120,49 @@ function migrateColumns() {
   }
   if (!colNames.has('manual_overtime_hours')) {
     db.exec(`ALTER TABLE workers ADD COLUMN manual_overtime_hours REAL DEFAULT NULL;`);
+  }
+
+  // Ensure projects table has color column
+  const projCols = db.prepare('PRAGMA table_info(projects)').all() as Array<{ name: string }>;
+  const projColNames = new Set(projCols.map((c) => c.name));
+  if (!projColNames.has('color')) {
+    db.exec(`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT 'emerald';`);
+    db.exec(`UPDATE projects SET color = 'indigo' WHERE id = 2;`);
+    db.exec(`UPDATE projects SET color = 'violet' WHERE id = 3;`);
+    db.exec(`UPDATE projects SET color = 'amber' WHERE id = 4;`);
+  }
+
+  // Ensure default projects exist
+  const projCount = (db.prepare('SELECT COUNT(*) as cnt FROM projects').get() as { cnt: number }).cnt;
+  if (projCount === 0) {
+    db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
+      'پروژه الف',
+      'پروژه اول (اصلی)',
+      'emerald'
+    );
+    db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
+      'پروژه ب',
+      'پروژه دوم',
+      'indigo'
+    );
+  }
+
+  if (!colNames.has('project_id')) {
+    db.exec(`ALTER TABLE workers ADD COLUMN project_id INTEGER NOT NULL DEFAULT 1;`);
+    // Put the 4th sample worker into Project 2 (پروژه ب) so both projects have sample data
+    const allW = db.prepare('SELECT id FROM workers ORDER BY id ASC').all() as Array<{ id: number }>;
+    if (allW.length >= 4) {
+      db.prepare('UPDATE workers SET project_id = 2 WHERE id = ?').run(allW[3].id);
+    }
+  }
+
+  const paymentCols = db.prepare('PRAGMA table_info(payments)').all() as Array<{ name: string }>;
+  const paymentColNames = new Set(paymentCols.map((c) => c.name));
+  if (!paymentColNames.has('project_id')) {
+    db.exec(`
+      ALTER TABLE payments ADD COLUMN project_id INTEGER NOT NULL DEFAULT 1;
+      UPDATE payments SET project_id = COALESCE((SELECT project_id FROM workers WHERE workers.id = payments.worker_id), 1);
+    `);
   }
 
   // Update first sample worker to showcase 5 Mehr to 23 Aban if not customized yet
@@ -158,11 +212,12 @@ function seedIfEmpty() {
   const mehr4Iso = shamsiToIso(todayShamsi.jy, 7, 4);   // ۴ مهر
 
   const insertWorker = db.prepare(`
-    INSERT INTO workers (name, role, phone, wage_type, base_wage, overtime_rate, start_date, end_date, calc_mode, auto_count_days, active, notes)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'to_today', 1, 1, ?)
+    INSERT INTO workers (project_id, name, role, phone, wage_type, base_wage, overtime_rate, start_date, end_date, calc_mode, auto_count_days, active, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'to_today', 1, 1, ?)
   `);
 
   const w1 = insertWorker.run(
+    1,
     'حسین رضایی',
     'استادکار بنا',
     '09123456781',
@@ -175,6 +230,7 @@ function seedIfEmpty() {
   ).lastInsertRowid as number;
 
   const w2 = insertWorker.run(
+    1,
     'مهدی کریمی',
     'جوشکار و آهنگر',
     '09128765432',
@@ -187,6 +243,7 @@ function seedIfEmpty() {
   ).lastInsertRowid as number;
 
   const w3 = insertWorker.run(
+    1,
     'علی محمدی',
     'کارگر ساده',
     '09351122334',
@@ -199,6 +256,7 @@ function seedIfEmpty() {
   ).lastInsertRowid as number;
 
   const w4 = insertWorker.run(
+    2,
     'رضا احمدی',
     'سرپرست کارگاه',
     '09129988776',
@@ -211,12 +269,12 @@ function seedIfEmpty() {
   ).lastInsertRowid as number;
 
   const insertPayment = db.prepare(`
-    INSERT INTO payments (worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO payments (project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  insertPayment.run(w1, todayIso, todayShamsi.jy, todayShamsi.jm, 4000000, 'advance', 'مساعده علی‌الحساب');
-  insertPayment.run(w4, todayIso, todayShamsi.jy, todayShamsi.jm, 5000000, 'advance', 'مساعده سرپرست');
+  insertPayment.run(1, w1, todayIso, todayShamsi.jy, todayShamsi.jm, 4000000, 'advance', 'مساعده علی‌الحساب');
+  insertPayment.run(2, w4, todayIso, todayShamsi.jy, todayShamsi.jm, 5000000, 'advance', 'مساعده سرپرست');
 }
 
 seedIfEmpty();
@@ -234,7 +292,14 @@ async function startServer() {
       const shamsiYear = Number(req.query.shamsiYear) || todayShamsi.jy;
       const shamsiMonth = Number(req.query.shamsiMonth) || todayShamsi.jm;
 
-      const workers = db.prepare('SELECT * FROM workers ORDER BY active DESC, id ASC').all() as Array<any>;
+      const projects = db.prepare('SELECT * FROM projects ORDER BY active DESC, id ASC').all() as Array<any>;
+
+      const workers = db.prepare(`
+        SELECT w.*, COALESCE(pr.name, 'پروژه الف') as project_name, COALESCE(pr.color, 'emerald') as project_color
+        FROM workers w
+        LEFT JOIN projects pr ON pr.id = w.project_id
+        ORDER BY w.active DESC, w.id ASC
+      `).all() as Array<any>;
 
       const dailyLogs = db
         .prepare('SELECT * FROM daily_logs WHERE work_date = ?')
@@ -535,6 +600,7 @@ async function startServer() {
 
       res.json({
         todayIso,
+        projects,
         workers,
         dailyLogs,
         allLogs,
@@ -550,10 +616,80 @@ async function startServer() {
     }
   });
 
+  // Create project
+  app.post('/api/projects', (req, res) => {
+    try {
+      const { name, description, color } = req.body;
+      if (!name || !String(name).trim()) {
+        return res.status(400).json({ error: 'نام پروژه الزامی است' });
+      }
+      const info = db
+        .prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)')
+        .run(
+          String(name).trim(),
+          String(description || '').trim(),
+          String(color || 'emerald').trim()
+        );
+      res.json({ id: Number(info.lastInsertRowid) });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Update project
+  app.put('/api/projects/:id', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const existing = db.prepare('SELECT * FROM projects WHERE id = ?').get(id) as any;
+      if (!existing) return res.status(404).json({ error: 'پروژه یافت نشد' });
+      const {
+        name = existing.name,
+        description = existing.description,
+        color = existing.color || 'emerald',
+        active = existing.active,
+      } = req.body;
+      db.prepare('UPDATE projects SET name = ?, description = ?, color = ?, active = ? WHERE id = ?').run(
+        String(name).trim(),
+        String(description || '').trim(),
+        String(color || 'emerald').trim(),
+        active === undefined ? 1 : Number(Boolean(active)),
+        id
+      );
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Delete project
+  app.delete('/api/projects/:id', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const countRow = db.prepare('SELECT COUNT(*) as cnt FROM projects').get() as { cnt: number };
+      if (countRow.cnt <= 1) {
+        return res.status(400).json({ error: 'حداقل یک پروژه باید در برنامه باقی بماند' });
+      }
+      db.exec('BEGIN TRANSACTION;');
+      try {
+        db.prepare('DELETE FROM payments WHERE project_id = ?').run(id);
+        db.prepare('DELETE FROM workers WHERE project_id = ?').run(id);
+        db.prepare('DELETE FROM projects WHERE id = ?').run(id);
+        db.exec('COMMIT;');
+      } catch (inner) {
+        db.exec('ROLLBACK;');
+        throw inner;
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Create worker
   app.post('/api/workers', (req, res) => {
     try {
       const {
+        project_id,
         name,
         role,
         phone,
@@ -574,13 +710,14 @@ async function startServer() {
       }
       const stmt = db.prepare(`
         INSERT INTO workers (
-          name, role, phone, wage_type, base_wage, overtime_rate,
+          project_id, name, role, phone, wage_type, base_wage, overtime_rate,
           start_date, end_date, calc_mode, manual_worked_days, manual_absent_days, manual_overtime_hours,
           auto_count_days, active, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
       `);
       const info = stmt.run(
+        Number(project_id) || 1,
         String(name).trim(),
         String(role || 'کارگر').trim(),
         String(phone || '').trim(),
@@ -614,6 +751,7 @@ async function startServer() {
       if (!existing) return res.status(404).json({ error: 'کارگر یافت نشد' });
 
       const {
+        project_id = existing.project_id,
         name = existing.name,
         role = existing.role,
         phone = existing.phone,
@@ -631,14 +769,17 @@ async function startServer() {
         notes = existing.notes,
       } = req.body;
 
+      const resolvedProjectId = Number(project_id) || existing.project_id || 1;
+
       db.prepare(`
         UPDATE workers
-        SET name = ?, role = ?, phone = ?, wage_type = ?, base_wage = ?, overtime_rate = ?,
+        SET project_id = ?, name = ?, role = ?, phone = ?, wage_type = ?, base_wage = ?, overtime_rate = ?,
             start_date = ?, end_date = ?, calc_mode = ?,
             manual_worked_days = ?, manual_absent_days = ?, manual_overtime_hours = ?,
             auto_count_days = ?, active = ?, notes = ?
         WHERE id = ?
       `).run(
+        resolvedProjectId,
         String(name).trim(),
         String(role || 'کارگر').trim(),
         String(phone || '').trim(),
@@ -660,6 +801,8 @@ async function startServer() {
         String(notes || '').trim(),
         id
       );
+
+      db.prepare('UPDATE payments SET project_id = ? WHERE worker_id = ?').run(resolvedProjectId, id);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -745,11 +888,13 @@ async function startServer() {
   // Bulk daily log
   app.post('/api/daily-log/bulk', (req, res) => {
     try {
-      const { work_date, status = 'present', project_name = '' } = req.body;
+      const { work_date, status = 'present', project_name = '', project_id } = req.body;
       if (!work_date) return res.status(400).json({ error: 'تاریخ الزامی است' });
 
       const sh = isoToShamsi(String(work_date));
-      const activeWorkers = db.prepare('SELECT id FROM workers WHERE active = 1').all() as Array<{ id: number }>;
+      const activeWorkers = project_id
+        ? (db.prepare('SELECT id FROM workers WHERE active = 1 AND project_id = ?').all(Number(project_id)) as Array<{ id: number }>)
+        : (db.prepare('SELECT id FROM workers WHERE active = 1').all() as Array<{ id: number }>);
       const daysEquiv = status === 'present' ? 1 : status === 'half' ? 0.5 : 0;
 
       const upsert = db.prepare(`
@@ -817,7 +962,7 @@ async function startServer() {
   // Add payment
   app.post('/api/payments', (req, res) => {
     try {
-      const { worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note } = req.body;
+      const { project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note } = req.body;
       if (!worker_id || !amount) {
         return res.status(400).json({ error: 'انتخاب کارگر و مبلغ الزامی است' });
       }
@@ -826,10 +971,14 @@ async function startServer() {
       const jy = Number(shamsi_year) || sh.jy;
       const jm = Number(shamsi_month) || sh.jm;
 
+      const workerRow = db.prepare('SELECT project_id FROM workers WHERE id = ?').get(Number(worker_id)) as any;
+      const resolvedProjectId = Number(project_id) || workerRow?.project_id || 1;
+
       db.prepare(`
-        INSERT INTO payments (worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO payments (project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
+        resolvedProjectId,
         Number(worker_id),
         iso,
         jy,
@@ -870,6 +1019,7 @@ async function startServer() {
     try {
       const data = {
         exportedAt: new Date().toISOString(),
+        projects: db.prepare('SELECT * FROM projects').all(),
         workers: db.prepare('SELECT * FROM workers').all(),
         daily_logs: db.prepare('SELECT * FROM daily_logs').all(),
         monthly_records: db.prepare('SELECT * FROM monthly_records').all(),
@@ -886,23 +1036,33 @@ async function startServer() {
   // Restore JSON backup
   app.post('/api/restore/json', (req, res) => {
     try {
-      const { workers, daily_logs, monthly_records, payments } = req.body;
+      const { projects, workers, daily_logs, monthly_records, payments } = req.body;
       if (!Array.isArray(workers)) {
         return res.status(400).json({ error: 'فایل پشتیبان معتبر نیست' });
       }
       db.exec('BEGIN TRANSACTION;');
       try {
         db.exec('DELETE FROM payments; DELETE FROM monthly_records; DELETE FROM daily_logs; DELETE FROM workers;');
+        if (Array.isArray(projects) && projects.length > 0) {
+          db.exec('DELETE FROM projects;');
+          const insPr = db.prepare(
+            'INSERT INTO projects (id, name, description, active, created_at) VALUES (?, ?, ?, ?, ?)'
+          );
+          for (const pr of projects) {
+            insPr.run(pr.id, pr.name, pr.description ?? '', pr.active ?? 1, pr.created_at ?? '');
+          }
+        }
         const insW = db.prepare(
           `INSERT INTO workers (
-            id, name, role, phone, wage_type, base_wage, overtime_rate,
+            id, project_id, name, role, phone, wage_type, base_wage, overtime_rate,
             start_date, end_date, calc_mode, manual_worked_days, manual_absent_days, manual_overtime_hours,
             auto_count_days, active, notes, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         for (const w of workers) {
           insW.run(
             w.id,
+            w.project_id ?? 1,
             w.name,
             w.role,
             w.phone,
@@ -939,10 +1099,10 @@ async function startServer() {
         }
         if (Array.isArray(payments)) {
           const insP = db.prepare(
-            'INSERT INTO payments (id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO payments (id, project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           );
           for (const p of payments) {
-            insP.run(p.id, p.worker_id, p.payment_date, p.shamsi_year, p.shamsi_month, p.amount, p.payment_type, p.note ?? '', p.created_at ?? '');
+            insP.run(p.id, p.project_id ?? 1, p.worker_id, p.payment_date, p.shamsi_year, p.shamsi_month, p.amount, p.payment_type, p.note ?? '', p.created_at ?? '');
           }
         }
         db.exec('COMMIT;');

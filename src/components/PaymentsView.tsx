@@ -1,15 +1,20 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, Wallet, Filter } from 'lucide-react';
+import { Plus, Trash2, Wallet, Filter, Calendar } from 'lucide-react';
 import { PaymentRecord, Worker, WorkerMonthlySummary } from '../types';
 import {
   PERSIAN_MONTHS,
+  formatShamsiDayMonth,
   formatShamsiShort,
   formatToman,
+  getShamsiMonthLength,
   getTodayIso,
+  isoToShamsi,
+  shamsiToIso,
   toPersianDigits,
 } from '../utils/jalali';
 
 interface PaymentsViewProps {
+  activeProjectName?: string;
   shamsiYear: number;
   shamsiMonth: number;
   workers: Worker[];
@@ -28,6 +33,7 @@ interface PaymentsViewProps {
 }
 
 export const PaymentsView: React.FC<PaymentsViewProps> = ({
+  activeProjectName = 'همه پروژه‌ها',
   shamsiYear,
   shamsiMonth,
   workers,
@@ -36,11 +42,25 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   onAddPayment,
   onDeletePayment,
 }) => {
+  const todayIso = getTodayIso();
+  const initialSh = isoToShamsi(todayIso);
+
   const activeWorkers = workers.filter((w) => w.active === 1);
   const [workerId, setWorkerId] = useState<string>(
     activeWorkers[0] ? String(activeWorkers[0].id) : ''
   );
+
+  React.useEffect(() => {
+    if (!workers.some((w) => String(w.id) === workerId)) {
+      setWorkerId(activeWorkers[0] ? String(activeWorkers[0].id) : '');
+    }
+    setFilterWorkerId('all');
+  }, [workers]);
+
   const [paymentType, setPaymentType] = useState<'advance' | 'salary' | 'deduction'>('advance');
+  const [payJy, setPayJy] = useState<number>(initialSh.jy);
+  const [payJm, setPayJm] = useState<number>(initialSh.jm);
+  const [payJd, setPayJd] = useState<number>(initialSh.jd);
   const [amount, setAmount] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [filterWorkerId, setFilterWorkerId] = useState<string>('all');
@@ -54,11 +74,15 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
     if (!workerId || !amount || Number(amount) <= 0) return;
     setSubmitting(true);
     try {
+      const maxD = getShamsiMonthLength(payJy, payJm);
+      const safeJd = Math.min(payJd, maxD);
+      const paymentDateIso = shamsiToIso(payJy, payJm, safeJd);
+
       await onAddPayment({
         worker_id: Number(workerId),
-        payment_date: getTodayIso(),
-        shamsi_year: shamsiYear,
-        shamsi_month: shamsiMonth,
+        payment_date: paymentDateIso,
+        shamsi_year: payJy,
+        shamsi_month: payJm,
         amount: Number(amount),
         payment_type: paymentType,
         note: note.trim(),
@@ -84,8 +108,8 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       >
         <div className="flex items-center gap-2">
           <Wallet className="w-5 h-5 text-emerald-600" />
-          <h2 className="text-base font-extrabold text-slate-900">
-            ثبت مساعده یا تسویه ({monthName} {toPersianDigits(shamsiYear)})
+          <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+            ثبت مساعده یا تسویه — «{activeProjectName}»
           </h2>
         </div>
 
@@ -137,7 +161,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <button
               type="button"
               onClick={() => setPaymentType('advance')}
-              className={`min-h-[44px] rounded-xl text-xs font-bold border transition-all ${
+              className={`min-h-[42px] rounded-xl text-xs font-bold border transition-all ${
                 paymentType === 'advance'
                   ? 'bg-gradient-to-l from-amber-500 to-orange-500 text-white border-amber-500 shadow-xs'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -148,7 +172,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <button
               type="button"
               onClick={() => setPaymentType('salary')}
-              className={`min-h-[44px] rounded-xl text-xs font-bold border transition-all ${
+              className={`min-h-[42px] rounded-xl text-xs font-bold border transition-all ${
                 paymentType === 'salary'
                   ? 'bg-gradient-to-l from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-xs'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -159,7 +183,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <button
               type="button"
               onClick={() => setPaymentType('deduction')}
-              className={`min-h-[44px] rounded-xl text-xs font-bold border transition-all ${
+              className={`min-h-[42px] rounded-xl text-xs font-bold border transition-all ${
                 paymentType === 'deduction'
                   ? 'bg-gradient-to-l from-rose-500 to-red-600 text-white border-rose-600 shadow-xs'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
@@ -167,6 +191,66 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             >
               کسر / خسارت
             </button>
+          </div>
+        </div>
+
+        {/* Payment Date Selector */}
+        <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/90 space-y-2">
+          <div className="flex items-center justify-between">
+            <label className="text-xs font-bold text-slate-700 inline-flex items-center gap-1">
+              <Calendar className="w-3.5 h-3.5 text-emerald-600" />
+              <span>تاریخ پرداخت</span>
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                const sh = isoToShamsi(todayIso);
+                setPayJy(sh.jy);
+                setPayJm(sh.jm);
+                setPayJd(sh.jd);
+              }}
+              className="w-fit px-2 py-0.5 rounded-md bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-[10px] font-bold transition-colors"
+            >
+              امروز ({formatShamsiDayMonth(todayIso)})
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-2 font-mono-num">
+            <select
+              value={payJd}
+              onChange={(e) => setPayJd(Number(e.target.value))}
+              className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+            >
+              {Array.from(
+                { length: getShamsiMonthLength(payJy, payJm) },
+                (_, i) => i + 1
+              ).map((d) => (
+                <option key={d} value={d}>
+                  روز {toPersianDigits(d)}
+                </option>
+              ))}
+            </select>
+            <select
+              value={payJm}
+              onChange={(e) => setPayJm(Number(e.target.value))}
+              className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+            >
+              {PERSIAN_MONTHS.map((m, idx) => (
+                <option key={m} value={idx + 1}>
+                  {m}
+                </option>
+              ))}
+            </select>
+            <select
+              value={payJy}
+              onChange={(e) => setPayJy(Number(e.target.value))}
+              className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+            >
+              {[1403, 1404, 1405, 1406, 1407].map((y) => (
+                <option key={y} value={y}>
+                  {toPersianDigits(y)}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
 
@@ -229,7 +313,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       <div className="lg:col-span-7 bg-white border border-emerald-100 rounded-3xl p-4 sm:p-5 space-y-4 shadow-xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-base font-bold text-slate-900">
-            لیست پرداختی‌ها و مساعده‌های {monthName} {toPersianDigits(shamsiYear)}
+            لیست پرداختی‌ها و مساعده‌های «{activeProjectName}»
           </h3>
 
           <div className="flex items-center gap-1.5">
@@ -251,7 +335,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
         {filteredPayments.length === 0 ? (
           <div className="py-12 text-center text-xs text-slate-500">
-            هیچ مساعده یا پرداختی در این ماه ثبت نشده است.
+            هیچ مساعده یا پرداختی ثبت نشده است.
           </div>
         ) : (
           <div className="divide-y divide-slate-100">

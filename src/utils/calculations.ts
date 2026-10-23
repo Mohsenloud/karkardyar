@@ -128,7 +128,7 @@ export function computeWorkerAccruedSummary(
   );
 
   const workerPaymentsToToday = allPayments.filter(
-    (p) => p.worker_id === w.id && p.payment_date >= startDate
+    (p) => p.worker_id === w.id
   );
 
   const deductionsToToday = workerPaymentsToToday

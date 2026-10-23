@@ -5,6 +5,12 @@ import {
   Wallet,
   Users,
   Download,
+  FolderKanban,
+  Plus,
+  Edit2,
+  Trash2,
+  X,
+  Check,
 } from 'lucide-react';
 import {
   AttendanceStatus,
@@ -12,11 +18,14 @@ import {
   CalcMode,
   DailyLog,
   PaymentRecord,
+  Project,
   Worker,
 } from './types';
 import {
+  formatToman,
   getTodayIso,
   isoToShamsi,
+  toPersianDigits,
 } from './utils/jalali';
 import {
   computeWorkerAccruedSummary,
@@ -26,8 +35,14 @@ import { DailyAttendanceView } from './components/DailyAttendanceView';
 import { MonthlySheetView } from './components/MonthlySheetView';
 import { PaymentsView } from './components/PaymentsView';
 import { WorkersView } from './components/WorkersView';
+import {
+  PROJECT_COLOR_KEYS,
+  PROJECT_THEMES,
+  ProjectColorKey,
+  getProjectTheme,
+} from './utils/projectThemes';
 
-type ActiveTab = 'daily' | 'monthly' | 'payments' | 'workers';
+type ActiveTab = 'monthly' | 'daily' | 'payments' | 'workers';
 
 export default function App() {
   const todayIso = getTodayIso();
@@ -38,10 +53,21 @@ export default function App() {
   const [shamsiYear, setShamsiYear] = useState<number>(initialShamsi.jy);
   const [shamsiMonth, setShamsiMonth] = useState<number>(initialShamsi.jm);
 
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number | 'all'>(1);
+
   const [workers, setWorkers] = useState<Worker[]>([]);
   const [allLogs, setAllLogs] = useState<DailyLog[]>([]);
   const [allPayments, setAllPayments] = useState<PaymentRecord[]>([]);
   const [dbFileSizeKb, setDbFileSizeKb] = useState<number>(0);
+
+  // Projects Management Modal State
+  const [showProjectsModal, setShowProjectsModal] = useState<boolean>(false);
+  const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
+  const [projectNameInput, setProjectNameInput] = useState<string>('');
+  const [projectDescInput, setProjectDescInput] = useState<string>('');
+  const [projectColorInput, setProjectColorInput] = useState<ProjectColorKey>('violet');
+  const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<number | null>(null);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -68,6 +94,13 @@ export default function App() {
           throw new Error('خطا در ارتباط با سرور SQLite');
         }
         const data: BootstrapResponse = await res.json();
+        const loadedProjects = data.projects || [];
+        setProjects(loadedProjects);
+        setSelectedProjectId((prev) => {
+          if (prev === 'all') return 'all';
+          if (loadedProjects.some((p) => p.id === prev)) return prev;
+          return loadedProjects[0]?.id ?? 'all';
+        });
         setWorkers(data.workers || []);
         setAllLogs(data.allLogs || []);
         setAllPayments(data.allPayments || []);
@@ -85,29 +118,65 @@ export default function App() {
     fetchAllData(selectedDate, shamsiYear, shamsiMonth);
   }, []);
 
-  // Instant 0ms derived state using useMemo (no waiting for network roundtrips!)
+  const activeProjectName = useMemo(() => {
+    if (selectedProjectId === 'all') return 'همه پروژه‌ها';
+    return projects.find((p) => p.id === selectedProjectId)?.name || 'پروژه';
+  }, [projects, selectedProjectId]);
+
+  const activeProjectColor = useMemo(() => {
+    if (selectedProjectId === 'all') return 'indigo';
+    const idx = projects.findIndex((p) => p.id === selectedProjectId);
+    const pr = idx >= 0 ? projects[idx] : undefined;
+    return getProjectTheme(pr?.color, Math.max(0, idx)).key;
+  }, [projects, selectedProjectId]);
+
+  // Filter workers by selected project
+  const projectWorkers = useMemo(() => {
+    const withProjectName = workers.map((w) => {
+      const pIdx = projects.findIndex((p) => p.id === w.project_id);
+      const pr = pIdx >= 0 ? projects[pIdx] : undefined;
+      return {
+        ...w,
+        project_name: pr?.name || w.project_name || 'پروژه الف',
+        project_color: getProjectTheme(pr?.color || w.project_color, Math.max(0, pIdx)).key,
+      };
+    });
+    if (selectedProjectId === 'all') return withProjectName;
+    return withProjectName.filter((w) => (w.project_id || 1) === selectedProjectId);
+  }, [workers, projects, selectedProjectId]);
+
+  const projectWorkerIds = useMemo(
+    () => new Set(projectWorkers.map((w) => w.id)),
+    [projectWorkers]
+  );
+
+  // Instant 0ms derived state using useMemo
   const dailyLogs = useMemo(
-    () => allLogs.filter((l) => l.work_date === selectedDate),
-    [allLogs, selectedDate]
+    () =>
+      allLogs.filter(
+        (l) => l.work_date === selectedDate && projectWorkerIds.has(l.worker_id)
+      ),
+    [allLogs, selectedDate, projectWorkerIds]
   );
 
   const monthLogs = useMemo(
     () =>
       allLogs.filter(
-        (l) => l.shamsi_year === shamsiYear && l.shamsi_month === shamsiMonth
+        (l) =>
+          l.shamsi_year === shamsiYear &&
+          l.shamsi_month === shamsiMonth &&
+          projectWorkerIds.has(l.worker_id)
       ),
-    [allLogs, shamsiYear, shamsiMonth]
+    [allLogs, shamsiYear, shamsiMonth, projectWorkerIds]
   );
 
   const payments = useMemo(
-    () =>
-      allPayments.filter(
-        (p) => p.shamsi_year === shamsiYear && p.shamsi_month === shamsiMonth
-      ),
-    [allPayments, shamsiYear, shamsiMonth]
+    () => allPayments.filter((p) => projectWorkerIds.has(p.worker_id)),
+    [allPayments, projectWorkerIds]
   );
 
-  const accruedSummaries = useMemo(
+  // All accrued summaries across all workers (used for per-project overview cards in modal)
+  const allWorkersAccruedSummaries = useMemo(
     () =>
       workers.map((w) =>
         computeWorkerAccruedSummary(w, allLogs, allPayments, todayIso)
@@ -115,9 +184,16 @@ export default function App() {
     [workers, allLogs, allPayments, todayIso]
   );
 
+  // Accrued summaries for the currently selected project
+  const accruedSummaries = useMemo(
+    () =>
+      allWorkersAccruedSummaries.filter((a) => projectWorkerIds.has(a.workerId)),
+    [allWorkersAccruedSummaries, projectWorkerIds]
+  );
+
   const summaries = useMemo(
     () =>
-      workers.map((w) =>
+      projectWorkers.map((w) =>
         computeWorkerMonthlySummary(
           w,
           allLogs,
@@ -127,8 +203,31 @@ export default function App() {
           todayIso
         )
       ),
-    [workers, allLogs, allPayments, shamsiYear, shamsiMonth, todayIso]
+    [projectWorkers, allLogs, allPayments, shamsiYear, shamsiMonth, todayIso]
   );
+
+  // Per-project statistics (how many workers, how many worked days, total earned, total paid, net payable)
+  const projectStatsList = useMemo(() => {
+    return projects.map((pr) => {
+      const prWorkers = workers.filter((w) => (w.project_id || 1) === pr.id);
+      const prWorkerIds = new Set(prWorkers.map((w) => w.id));
+      const prAccrued = allWorkersAccruedSummaries.filter((a) =>
+        prWorkerIds.has(a.workerId)
+      );
+      const totalDays = prAccrued.reduce((s, a) => s + a.effectiveDaysToToday, 0);
+      const totalGross = prAccrued.reduce((s, a) => s + a.grossEarnedToToday, 0);
+      const totalPaid = prAccrued.reduce((s, a) => s + a.paidToToday, 0);
+      const netPayable = prAccrued.reduce((s, a) => s + a.netPayableToToday, 0);
+      return {
+        project: pr,
+        workersCount: prWorkers.length,
+        totalDays,
+        totalGross,
+        totalPaid,
+        netPayable,
+      };
+    });
+  }, [projects, workers, allWorkersAccruedSummaries]);
 
   const handleSelectDate = (iso: string) => {
     setSelectedDate(iso);
@@ -136,6 +235,72 @@ export default function App() {
     if (sh.jy !== shamsiYear || sh.jm !== shamsiMonth) {
       setShamsiYear(sh.jy);
       setShamsiMonth(sh.jm);
+    }
+  };
+
+  // Project CRUD handlers
+  const handleSaveProject = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!projectNameInput.trim()) return;
+
+    if (editingProjectId) {
+      const updatedName = projectNameInput.trim();
+      const updatedDesc = projectDescInput.trim();
+      const updatedColor = projectColorInput;
+      setProjects((prev) =>
+        prev.map((p) =>
+          p.id === editingProjectId
+            ? { ...p, name: updatedName, description: updatedDesc, color: updatedColor }
+            : p
+        )
+      );
+      setEditingProjectId(null);
+      setProjectNameInput('');
+      setProjectDescInput('');
+      showToast('مشخصات و رنگ پروژه ویرایش شد');
+
+      fetch(`/api/projects/${editingProjectId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: updatedName,
+          description: updatedDesc,
+          color: updatedColor,
+        }),
+      }).catch(() => setErrorMsg('خطا در ویرایش پروژه'));
+    } else {
+      const res = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: projectNameInput.trim(),
+          description: projectDescInput.trim(),
+          color: projectColorInput,
+        }),
+      });
+      if (res.ok) {
+        const created = await res.json();
+        await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+        if (created?.id) {
+          setSelectedProjectId(Number(created.id));
+        }
+        setProjectNameInput('');
+        setProjectDescInput('');
+        showToast('پروژه جدید ایجاد شد');
+      }
+    }
+  };
+
+  const handleDeleteProject = async (id: number) => {
+    if (projects.length <= 1) {
+      showToast('حداقل یک پروژه باید باقی بماند');
+      return;
+    }
+    const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      setConfirmDeleteProjectId(null);
+      await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+      showToast('پروژه و حساب‌های آن حذف شد');
     }
   };
 
@@ -152,7 +317,6 @@ export default function App() {
   }) => {
     const sh = isoToShamsi(payload.work_date);
 
-    // 1. Update local state IMMEDIATELY (0ms latency)
     setAllLogs((prev) => {
       const filtered = prev.filter(
         (l) => !(l.worker_id === payload.worker_id && l.work_date === payload.work_date)
@@ -192,13 +356,12 @@ export default function App() {
         project_name:
           payload.project_name !== undefined
             ? payload.project_name
-            : existing?.project_name ?? '',
+            : existing?.project_name ?? activeProjectName,
         note: payload.note !== undefined ? payload.note : existing?.note ?? '',
       };
       return [...filtered, updatedLog];
     });
 
-    // 2. Persist in SQLite in background
     fetch('/api/daily-log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -208,10 +371,10 @@ export default function App() {
     });
   };
 
-  // Optimistic 0ms bulk mark present
+  // Optimistic 0ms bulk mark present for active project workers
   const handleBulkMarkPresent = async (projectName: string) => {
     const sh = isoToShamsi(selectedDate);
-    const activeWorkers = workers.filter((w) => w.active === 1);
+    const activeWorkers = projectWorkers.filter((w) => w.active === 1);
 
     setAllLogs((prev) => {
       const next = [...prev];
@@ -224,7 +387,7 @@ export default function App() {
             ...next[idx],
             status: 'present',
             days_equiv: 1,
-            project_name: next[idx].project_name || projectName,
+            project_name: next[idx].project_name || projectName || activeProjectName,
           };
         } else {
           next.push({
@@ -238,7 +401,7 @@ export default function App() {
             days_equiv: 1,
             overtime_hours: 0,
             bonus_amount: 0,
-            project_name: projectName,
+            project_name: projectName || activeProjectName,
             note: '',
           });
         }
@@ -246,7 +409,7 @@ export default function App() {
       return next;
     });
 
-    showToast('حضور تمام کارگران ثبت شد');
+    showToast(`حضور کارگران «${activeProjectName}» ثبت شد`);
 
     fetch('/api/daily-log/bulk', {
       method: 'POST',
@@ -254,7 +417,8 @@ export default function App() {
       body: JSON.stringify({
         work_date: selectedDate,
         status: 'present',
-        project_name: projectName,
+        project_name: projectName || activeProjectName,
+        project_id: selectedProjectId === 'all' ? undefined : selectedProjectId,
       }),
     }).catch(() => {
       setErrorMsg('خطا در ثبت گروهی');
@@ -272,8 +436,12 @@ export default function App() {
     note: string;
   }) => {
     const w = workers.find((x) => x.id === payload.worker_id);
+    const resolvedProjectId =
+      w?.project_id || (selectedProjectId !== 'all' ? selectedProjectId : 1);
+
     const optimisticPayment: PaymentRecord = {
       id: Date.now(),
+      project_id: resolvedProjectId,
       worker_id: payload.worker_id,
       worker_name: w?.name || '',
       worker_role: w?.role || '',
@@ -291,21 +459,36 @@ export default function App() {
     fetch('/api/payments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
     })
       .then(() => fetchAllData(selectedDate, shamsiYear, shamsiMonth))
       .catch(() => setErrorMsg('خطا در ثبت پرداخت'));
   };
 
-  const handleQuickSettleWorker = (worker: Worker, amount: number) => {
+  const handleQuickSettleWorker = (
+    worker: Worker,
+    amount: number,
+    paymentType: 'advance' | 'salary' | 'deduction' = 'salary',
+    customNote?: string,
+    paymentDateIso?: string
+  ) => {
+    const chosenDate = paymentDateIso || getTodayIso();
+    const sh = isoToShamsi(chosenDate);
+    const defaultNote =
+      paymentType === 'advance'
+        ? `مساعده علی‌الحساب (${worker.project_name || activeProjectName})`
+        : paymentType === 'salary'
+        ? `تسویه کارکرد (${worker.project_name || activeProjectName})`
+        : `کسر / خسارت (${worker.project_name || activeProjectName})`;
+
     handleAddPayment({
       worker_id: worker.id,
-      payment_date: getTodayIso(),
-      shamsi_year: shamsiYear,
-      shamsi_month: shamsiMonth,
+      payment_date: chosenDate,
+      shamsi_year: sh.jy,
+      shamsi_month: sh.jm,
       amount,
-      payment_type: 'salary',
-      note: 'تسویه کارکرد',
+      payment_type: paymentType,
+      note: customNote?.trim() || defaultNote,
     });
   };
 
@@ -320,6 +503,7 @@ export default function App() {
   // Optimistic 0ms worker update
   const handleSaveWorker = async (payload: {
     id?: number;
+    project_id: number;
     name: string;
     role: string;
     phone: string;
@@ -336,13 +520,17 @@ export default function App() {
     active: number;
     notes: string;
   }) => {
+    const projName =
+      projects.find((p) => p.id === payload.project_id)?.name || 'پروژه الف';
+
     if (payload.id) {
-      // Update worker immediately in memory (0ms latency)
       setWorkers((prev) =>
         prev.map((w) =>
           w.id === payload.id
             ? {
                 ...w,
+                project_id: payload.project_id,
+                project_name: projName,
                 name: payload.name,
                 role: payload.role,
                 phone: payload.phone,
@@ -385,7 +573,7 @@ export default function App() {
       });
       if (res.ok) {
         await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
-        showToast('کارگر جدید اضافه شد');
+        showToast(`کارگر جدید در «${projName}» ثبت شد`);
       }
     }
   };
@@ -404,6 +592,7 @@ export default function App() {
   ) => {
     handleSaveWorker({
       id: worker.id,
+      project_id: worker.project_id || 1,
       name: worker.name,
       role: worker.role,
       phone: worker.phone,
@@ -532,9 +721,82 @@ export default function App() {
       </header>
 
       {/* Main Content Container */}
-      <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-5 pt-3.5 sm:pt-5">
+      <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-5 pt-3 sm:pt-4 space-y-3.5">
+        {/* Project Selector & Management Bar — Modern Per-Project Color Pills */}
+        <section className="bg-white/90 backdrop-blur-md border border-slate-200/80 rounded-2xl p-2.5 sm:p-3 flex flex-wrap items-center justify-between gap-2 shadow-xs no-print">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold text-slate-500 ml-1 inline-flex items-center gap-1">
+              <FolderKanban className="w-3.5 h-3.5 text-slate-600" />
+              <span>پروژه:</span>
+            </span>
+
+            {projects.map((pr, idx) => {
+              const isSelected = selectedProjectId === pr.id;
+              const prTheme = getProjectTheme(pr.color, idx);
+              const prWorkersCount = workers.filter(
+                (w) => (w.project_id || 1) === pr.id
+              ).length;
+              return (
+                <button
+                  key={pr.id}
+                  type="button"
+                  onClick={() => setSelectedProjectId(pr.id)}
+                  className={`w-fit h-8 px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 transition-all whitespace-nowrap active:scale-95 ${
+                    isSelected ? prTheme.activeTabBtn : prTheme.inactiveTabBtn
+                  }`}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      isSelected ? 'bg-white' : prTheme.dotClass
+                    }`}
+                  />
+                  <span>{pr.name}</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded-md text-[10px] font-mono-num ${
+                      isSelected ? 'bg-white/20 text-white' : 'bg-white/90 text-slate-700'
+                    }`}
+                  >
+                    {toPersianDigits(prWorkersCount)}
+                  </span>
+                </button>
+              );
+            })}
+
+            {projects.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setSelectedProjectId('all')}
+                className={`w-fit h-8 px-2.5 rounded-xl text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
+                  selectedProjectId === 'all'
+                    ? 'bg-slate-800 text-white shadow-xs'
+                    : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                }`}
+              >
+                <span>همه پروژه‌ها ({toPersianDigits(workers.length)})</span>
+              </button>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setEditingProjectId(null);
+              setProjectNameInput('');
+              setProjectDescInput('');
+              const nextColor =
+                PROJECT_COLOR_KEYS[projects.length % PROJECT_COLOR_KEYS.length];
+              setProjectColorInput(nextColor);
+              setShowProjectsModal(true);
+            }}
+            className="w-fit h-8 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-extrabold inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 shadow-2xs"
+          >
+            <Plus className="w-3.5 h-3.5 text-emerald-300" />
+            <span>تعریف و حساب پروژه‌ها</span>
+          </button>
+        </section>
+
         {errorMsg && (
-          <div className="mb-4 p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
+          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
             <span>{errorMsg}</span>
             <button
               type="button"
@@ -564,13 +826,15 @@ export default function App() {
           <>
             {activeTab === 'monthly' && (
               <MonthlySheetView
+                activeProjectName={activeProjectName}
+                activeProjectColor={activeProjectColor}
                 shamsiYear={shamsiYear}
                 shamsiMonth={shamsiMonth}
                 onChangeMonth={(y, m) => {
                   setShamsiYear(y);
                   setShamsiMonth(m);
                 }}
-                workers={workers}
+                workers={projectWorkers}
                 summaries={summaries}
                 accruedSummaries={accruedSummaries}
                 monthLogs={monthLogs}
@@ -578,6 +842,7 @@ export default function App() {
                 onSaveDailyLog={handleSaveDailyLog}
                 onSaveWorkerRangeAndDays={handleSaveWorkerRangeAndDays}
                 onQuickSettleWorker={handleQuickSettleWorker}
+                onOpenWorkersTab={() => setActiveTab('workers')}
               />
             )}
 
@@ -585,7 +850,7 @@ export default function App() {
               <DailyAttendanceView
                 selectedDate={selectedDate}
                 onSelectDate={handleSelectDate}
-                workers={workers}
+                workers={projectWorkers}
                 dailyLogs={dailyLogs}
                 accruedSummaries={accruedSummaries}
                 onSaveDailyLog={handleSaveDailyLog}
@@ -598,9 +863,10 @@ export default function App() {
 
             {activeTab === 'payments' && (
               <PaymentsView
+                activeProjectName={activeProjectName}
                 shamsiYear={shamsiYear}
                 shamsiMonth={shamsiMonth}
-                workers={workers}
+                workers={projectWorkers}
                 summaries={summaries}
                 payments={payments}
                 onAddPayment={handleAddPayment}
@@ -610,7 +876,9 @@ export default function App() {
 
             {activeTab === 'workers' && (
               <WorkersView
-                workers={workers}
+                projects={projects}
+                selectedProjectId={selectedProjectId}
+                workers={projectWorkers}
                 dbFileSizeKb={dbFileSizeKb}
                 onSaveWorker={handleSaveWorker}
                 onDeleteWorker={handleDeleteWorker}
@@ -620,6 +888,247 @@ export default function App() {
           </>
         )}
       </main>
+
+      {/* Separate Modal Window for Defining Projects & Viewing Isolated Project Accounts */}
+      {showProjectsModal && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+          onClick={() => setShowProjectsModal(false)}
+        >
+          <div
+            className="bg-white border border-emerald-100 rounded-2xl max-w-lg w-full p-4 sm:p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <FolderKanban className="w-5 h-5 text-emerald-600" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+                    مدیریت پروژه‌ها و تفکیک حساب‌ها
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    تعریف پروژه جدید و مشاهده خلاصه کارکرد و حساب هر پروژه
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowProjectsModal(false)}
+                className="w-8 h-8 rounded-lg border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Form to Add / Edit Project with Color Picker */}
+            <form
+              onSubmit={handleSaveProject}
+              className="bg-slate-50 border border-slate-200/90 rounded-2xl p-3.5 space-y-3 shrink-0"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-extrabold text-slate-900">
+                  {editingProjectId ? 'ویرایش مشخصات و رنگ پروژه' : 'تعریف پروژه جدید'}
+                </span>
+                {editingProjectId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingProjectId(null);
+                      setProjectNameInput('');
+                      setProjectDescInput('');
+                    }}
+                    className="text-[11px] text-slate-500 hover:text-slate-800"
+                  >
+                    انصراف از ویرایش
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={projectNameInput}
+                  onChange={(e) => setProjectNameInput(e.target.value)}
+                  placeholder="نام پروژه (مثلاً: پروژه ج - ساختمان ولنجک)"
+                  className="h-9 px-3 rounded-xl border border-slate-300 bg-white text-xs focus:outline-none focus:border-emerald-600"
+                  required
+                />
+                <input
+                  type="text"
+                  value={projectDescInput}
+                  onChange={(e) => setProjectDescInput(e.target.value)}
+                  placeholder="توضیح یا آدرس (اختیاری)"
+                  className="h-9 px-3 rounded-xl border border-slate-300 bg-white text-xs focus:outline-none focus:border-emerald-600"
+                />
+              </div>
+
+              {/* Project Color Swatch Selector */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[11px] font-bold text-slate-600 ml-1">
+                    رنگ پروژه:
+                  </span>
+                  {PROJECT_COLOR_KEYS.map((cKey) => {
+                    const palette = PROJECT_THEMES[cKey];
+                    const isPicked = projectColorInput === cKey;
+                    return (
+                      <button
+                        key={cKey}
+                        type="button"
+                        onClick={() => setProjectColorInput(cKey)}
+                        className={`w-fit h-7 px-2.5 rounded-lg text-[10px] font-bold inline-flex items-center gap-1.5 border transition-all ${
+                          isPicked
+                            ? `${palette.swatchClass} text-white border-transparent shadow-xs scale-105`
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        <span
+                          className={`w-2.5 h-2.5 rounded-full ${
+                            isPicked ? 'bg-white' : palette.dotClass
+                          }`}
+                        />
+                        <span>{palette.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-fit h-8 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1 shadow-2xs"
+                >
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>{editingProjectId ? 'ذخیره ویرایش' : 'ثبت پروژه جدید'}</span>
+                </button>
+              </div>
+            </form>
+
+            {/* List of Projects with Isolated Worker & Financial Summary */}
+            <div className="space-y-2.5 overflow-y-auto pr-0.5 font-mono-num">
+              {projectStatsList.map((item, idx) => {
+                const isCurrent = selectedProjectId === item.project.id;
+                const prTheme = getProjectTheme(item.project.color, idx);
+                return (
+                  <div
+                    key={item.project.id}
+                    className={`rounded-2xl p-3 border transition-all space-y-2.5 ${prTheme.cardSoftBg} ${prTheme.cardBorder}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`w-2.5 h-2.5 rounded-full ${prTheme.dotClass}`} />
+                          <h4 className="text-sm font-extrabold text-slate-900">
+                            {item.project.name}
+                          </h4>
+                          {isCurrent && (
+                            <span className="w-fit px-2 py-0.5 rounded-md bg-slate-900 text-white text-[9px] font-bold">
+                              پروژه فعال
+                            </span>
+                          )}
+                        </div>
+                        {item.project.description && (
+                          <p className="text-[11px] text-slate-600 mt-0.5">
+                            {item.project.description}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedProjectId(item.project.id);
+                            setShowProjectsModal(false);
+                          }}
+                          className={`w-fit h-8 px-2.5 rounded-xl text-[11px] font-extrabold transition-all ${prTheme.activeTabBtn}`}
+                        >
+                          مشاهده پروژه
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingProjectId(item.project.id);
+                            setProjectNameInput(item.project.name);
+                            setProjectDescInput(item.project.description || '');
+                            setProjectColorInput(prTheme.key);
+                          }}
+                          className="w-8 h-8 rounded-xl bg-white border border-slate-200 text-slate-600 hover:text-slate-900 flex items-center justify-center shadow-2xs"
+                          title="ویرایش نام و رنگ پروژه"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+
+                        {projects.length > 1 && (
+                          <>
+                            {confirmDeleteProjectId === item.project.id ? (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteProject(item.project.id)}
+                                  className="w-fit h-8 px-2 rounded-lg bg-rose-600 text-white text-[10px] font-bold"
+                                >
+                                  حذف
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteProjectId(null)}
+                                  className="w-fit h-8 px-2 rounded-lg bg-white text-[10px] text-slate-600"
+                                >
+                                  لغو
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteProjectId(item.project.id)}
+                                className="w-8 h-8 rounded-xl bg-white border border-slate-200 text-slate-400 hover:text-rose-600 flex items-center justify-center shadow-2xs"
+                                title="حذف پروژه"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Isolated Project Metrics */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-center bg-white/95 rounded-xl p-2 border border-white shadow-2xs">
+                      <div>
+                        <span className="text-[9px] text-slate-500 block">تعداد کارگران</span>
+                        <span className="text-xs font-extrabold text-slate-900">
+                          {toPersianDigits(item.workersCount)} نفر
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-500 block">مجموع کارکرد</span>
+                        <span className={`text-xs font-extrabold ${prTheme.accentText}`}>
+                          {toPersianDigits(item.totalDays)} روز
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-500 block">مساعده پرداختی</span>
+                        <span className="text-xs font-extrabold text-amber-700">
+                          {formatToman(item.totalPaid)} ت
+                        </span>
+                      </div>
+                      <div>
+                        <span className={`text-[9px] font-bold block ${prTheme.accentText}`}>
+                          مانده حساب پروژه
+                        </span>
+                        <span className={`text-xs font-extrabold ${prTheme.accentText}`}>
+                          {formatToman(item.netPayable)} ت
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mobile Fixed Bottom Navigation Bar (Natural Thumb Zone) */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-emerald-100 shadow-lg no-print">

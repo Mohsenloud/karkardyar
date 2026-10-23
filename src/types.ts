@@ -4,8 +4,20 @@ export type AttendanceStatus = 'present' | 'half' | 'absent' | 'paid_leave';
 
 export type CalcMode = 'to_today' | 'full_range' | 'manual';
 
+export interface Project {
+  id: number;
+  name: string;
+  description: string;
+  color?: string;
+  active: number;
+  created_at?: string;
+}
+
 export interface Worker {
   id: number;
+  project_id: number;                 // شناسه پروژه مربوطه
+  project_name?: string;              // نام پروژه
+  project_color?: string;             // رنگ پروژه
   name: string;
   role: string;
   phone: string;
@@ -97,6 +109,7 @@ export interface WorkerMonthlySummary {
 
 export interface PaymentRecord {
   id: number;
+  project_id?: number;
   worker_id: number;
   worker_name?: string;
   worker_role?: string;
@@ -111,6 +124,7 @@ export interface PaymentRecord {
 
 export interface BootstrapResponse {
   todayIso: string;
+  projects: Project[];
   workers: Worker[];
   dailyLogs: DailyLog[];
   allLogs: DailyLog[];
