@@ -1,21 +1,83 @@
 import express from 'express';
+import crypto from 'node:crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer as createViteServer } from 'vite';
 import { isoToShamsi, getTodayIso, shamsiToIso } from './src/utils/jalali.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+
+// In development/preview (AI Studio), store the preview SQLite DB in os.tmpdir()
+// so that no .sqlite file is ever created inside the Git workspace or exported to GitHub.
+// In production (Docker/VPS), use DATA_DIR (mounted outside the Git repo folder).
+const isProduction = process.env.NODE_ENV === 'production';
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.cwd(), process.env.DATA_DIR)
+  : isProduction
+  ? path.resolve(process.cwd(), 'data')
+  : path.join(os.tmpdir(), 'karkardyar-preview-data');
+
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
-const DB_PATH = path.join(DATA_DIR, 'karkard.sqlite');
+
+const DB_PATH = process.env.DB_PATH
+  ? path.resolve(process.cwd(), process.env.DB_PATH)
+  : path.join(DATA_DIR, 'karkard.sqlite');
+
+// Automatic zero-loss migration: if DB_PATH does not exist yet in the new persistent volume,
+// but a database exists in LEGACY_DATA_DIR (e.g. ./data/karkard.sqlite on the server), copy it over.
+function migrateLegacyDatabaseFileIfNeeded() {
+  if (fs.existsSync(DB_PATH) && fs.statSync(DB_PATH).size > 0) {
+    return;
+  }
+  const candidateDirs = [
+    process.env.LEGACY_DATA_DIR ? path.resolve(process.cwd(), process.env.LEGACY_DATA_DIR) : null,
+    isProduction ? path.resolve(process.cwd(), 'data') : null,
+  ].filter(Boolean) as string[];
+
+  for (const legacyDir of candidateDirs) {
+    if (path.resolve(legacyDir) === path.resolve(DATA_DIR)) continue;
+    const legacyDbFile = path.join(legacyDir, 'karkard.sqlite');
+    if (fs.existsSync(legacyDbFile) && fs.statSync(legacyDbFile).size > 0) {
+      try {
+        fs.copyFileSync(legacyDbFile, DB_PATH);
+        for (const suffix of ['-wal', '-shm']) {
+          const srcExtra = `${legacyDbFile}${suffix}`;
+          const dstExtra = `${DB_PATH}${suffix}`;
+          if (fs.existsSync(srcExtra)) {
+            fs.copyFileSync(srcExtra, dstExtra);
+          }
+        }
+        console.log(`[SQLite] Migrated existing database from ${legacyDbFile} to ${DB_PATH}`);
+        break;
+      } catch (err) {
+        console.error('[SQLite] Failed to copy legacy database file:', err);
+      }
+    }
+  }
+}
+
+migrateLegacyDatabaseFileIfNeeded();
 
 const db = new DatabaseSync(DB_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
+
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+  );
 
   CREATE TABLE IF NOT EXISTS projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,38 +184,18 @@ function migrateColumns() {
     db.exec(`ALTER TABLE workers ADD COLUMN manual_overtime_hours REAL DEFAULT NULL;`);
   }
 
-  // Ensure projects table has color column
+  // Ensure projects table has color column (non-destructive schema migration only)
   const projCols = db.prepare('PRAGMA table_info(projects)').all() as Array<{ name: string }>;
   const projColNames = new Set(projCols.map((c) => c.name));
   if (!projColNames.has('color')) {
     db.exec(`ALTER TABLE projects ADD COLUMN color TEXT DEFAULT 'emerald';`);
-    db.exec(`UPDATE projects SET color = 'indigo' WHERE id = 2;`);
-    db.exec(`UPDATE projects SET color = 'violet' WHERE id = 3;`);
-    db.exec(`UPDATE projects SET color = 'amber' WHERE id = 4;`);
-  }
-
-  // Ensure default projects exist
-  const projCount = (db.prepare('SELECT COUNT(*) as cnt FROM projects').get() as { cnt: number }).cnt;
-  if (projCount === 0) {
-    db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
-      'پروژه الف',
-      'پروژه اول (اصلی)',
-      'emerald'
-    );
-    db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
-      'پروژه ب',
-      'پروژه دوم',
-      'indigo'
-    );
+    db.exec(`UPDATE projects SET color = 'indigo' WHERE id = 2 AND (color IS NULL OR color = 'emerald');`);
+    db.exec(`UPDATE projects SET color = 'violet' WHERE id = 3 AND (color IS NULL OR color = 'emerald');`);
+    db.exec(`UPDATE projects SET color = 'amber' WHERE id = 4 AND (color IS NULL OR color = 'emerald');`);
   }
 
   if (!colNames.has('project_id')) {
     db.exec(`ALTER TABLE workers ADD COLUMN project_id INTEGER NOT NULL DEFAULT 1;`);
-    // Put the 4th sample worker into Project 2 (پروژه ب) so both projects have sample data
-    const allW = db.prepare('SELECT id FROM workers ORDER BY id ASC').all() as Array<{ id: number }>;
-    if (allW.length >= 4) {
-      db.prepare('UPDATE workers SET project_id = 2 WHERE id = ?').run(allW[3].id);
-    }
   }
 
   const paymentCols = db.prepare('PRAGMA table_info(payments)').all() as Array<{ name: string }>;
@@ -164,22 +206,6 @@ function migrateColumns() {
       UPDATE payments SET project_id = COALESCE((SELECT project_id FROM workers WHERE workers.id = payments.worker_id), 1);
     `);
   }
-
-  // Update first sample worker to showcase 5 Mehr to 23 Aban if not customized yet
-  const firstWorker = db.prepare('SELECT id, start_date FROM workers ORDER BY id ASC LIMIT 1').get() as any;
-  if (firstWorker && (!firstWorker.start_date || firstWorker.start_date === shamsiToIso(todayShamsi.jy, 7, 4))) {
-    db.prepare('UPDATE workers SET start_date = ?, end_date = ? WHERE id = ?').run(
-      mehr5Iso,
-      aban23Iso,
-      firstWorker.id
-    );
-  }
-
-  // Normalize any 0.5 half-day logs to 1 full day as requested
-  db.exec(`
-    UPDATE daily_logs SET status = 'present', days_equiv = 1 WHERE status = 'half' OR days_equiv = 0.5;
-    UPDATE workers SET manual_worked_days = ROUND(manual_worked_days) WHERE manual_worked_days IS NOT NULL;
-  `);
 }
 
 migrateColumns();
@@ -202,8 +228,63 @@ function addDaysToIso(iso: string, days: number): string {
 }
 
 function seedIfEmpty() {
-  const countRow = db.prepare('SELECT COUNT(*) as cnt FROM workers').get() as { cnt: number };
-  if (countRow.cnt > 0) return;
+  // Check if this database has already been initialized in the past.
+  // Once initialized, NEVER re-seed sample workers or modify user data on updates/restarts.
+  const metaRow = db
+    .prepare("SELECT value FROM app_meta WHERE key = 'initial_seed_done'")
+    .get() as { value: string } | undefined;
+
+  if (metaRow?.value === '1') {
+    // Ensure at least one project exists so the UI always has a valid project
+    const projCount = (db.prepare('SELECT COUNT(*) as cnt FROM projects').get() as { cnt: number }).cnt;
+    if (projCount === 0) {
+      db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
+        'پروژه الف',
+        'پروژه اصلی',
+        'emerald'
+      );
+    }
+    return;
+  }
+
+  const workerCount = (db.prepare('SELECT COUNT(*) as cnt FROM workers').get() as { cnt: number }).cnt;
+  const logCount = (db.prepare('SELECT COUNT(*) as cnt FROM daily_logs').get() as { cnt: number }).cnt;
+  const paymentCount = (db.prepare('SELECT COUNT(*) as cnt FROM payments').get() as { cnt: number }).cnt;
+  const projCount = (db.prepare('SELECT COUNT(*) as cnt FROM projects').get() as { cnt: number }).cnt;
+
+  // If the database already contains any existing records (from a previous deployment),
+  // mark it as initialized immediately and DO NOT seed or overwrite anything.
+  if (workerCount > 0 || logCount > 0 || paymentCount > 0) {
+    if (projCount === 0) {
+      db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
+        'پروژه الف',
+        'پروژه اصلی',
+        'emerald'
+      );
+    }
+    db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('initial_seed_done', '1')").run();
+    return;
+  }
+
+  // Brand-new database initialization: create default projects
+  if (projCount === 0) {
+    db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
+      'پروژه الف',
+      'پروژه اول (اصلی)',
+      'emerald'
+    );
+    db.prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)').run(
+      'پروژه ب',
+      'پروژه دوم',
+      'indigo'
+    );
+  }
+
+  // If SEED_SAMPLE_DATA is explicitly set to 'false' on the server, skip sample workers
+  if (process.env.SEED_SAMPLE_DATA === 'false') {
+    db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('initial_seed_done', '1')").run();
+    return;
+  }
 
   const todayIso = getTodayIso();
   const todayShamsi = isoToShamsi(todayIso);
@@ -229,7 +310,7 @@ function seedIfEmpty() {
     'ورود ۵ مهر تا ۲۳ آبان'
   ).lastInsertRowid as number;
 
-  const w2 = insertWorker.run(
+  insertWorker.run(
     1,
     'مهدی کریمی',
     'جوشکار و آهنگر',
@@ -240,9 +321,9 @@ function seedIfEmpty() {
     mehr4Iso,
     addDaysToIso(todayIso, 8),
     'جوشکاری سازه و نبشی‌کشی'
-  ).lastInsertRowid as number;
+  );
 
-  const w3 = insertWorker.run(
+  insertWorker.run(
     1,
     'علی محمدی',
     'کارگر ساده',
@@ -253,7 +334,7 @@ function seedIfEmpty() {
     mehr5Iso,
     aban23Iso,
     'ملات‌سازی و حمل مصالح'
-  ).lastInsertRowid as number;
+  );
 
   const w4 = insertWorker.run(
     2,
@@ -275,13 +356,444 @@ function seedIfEmpty() {
 
   insertPayment.run(1, w1, todayIso, todayShamsi.jy, todayShamsi.jm, 4000000, 'advance', 'مساعده علی‌الحساب');
   insertPayment.run(2, w4, todayIso, todayShamsi.jy, todayShamsi.jm, 5000000, 'advance', 'مساعده سرپرست');
+
+  db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('initial_seed_done', '1')").run();
 }
 
 seedIfEmpty();
 
+// ============================================================================
+// High-Security Authentication System (scrypt + random salt + SHA-256 sessions + Rate Limiter)
+// ============================================================================
+const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
+const SCRYPT_KEYLEN = 64;
+const SESSION_COOKIE_NAME = 'karkard_session';
+
+function hashPassword(password: string, saltHex?: string): { hashHex: string; saltHex: string } {
+  const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
+  const derived = crypto.scryptSync(password, salt, SCRYPT_KEYLEN, SCRYPT_PARAMS);
+  return {
+    hashHex: derived.toString('hex'),
+    saltHex: salt.toString('hex'),
+  };
+}
+
+function verifyPassword(password: string, storedHashHex: string, storedSaltHex: string): boolean {
+  try {
+    const { hashHex } = hashPassword(password, storedSaltHex);
+    const bufA = Buffer.from(hashHex, 'hex');
+    const bufB = Buffer.from(storedHashHex, 'hex');
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+  } catch {
+    return false;
+  }
+}
+
+function timingSafeStringMatch(input: string, expected: string): boolean {
+  const hashA = crypto.createHash('sha256').update(String(input)).digest();
+  const hashB = crypto.createHash('sha256').update(String(expected)).digest();
+  return crypto.timingSafeEqual(hashA, hashB) && input.length === expected.length;
+}
+
+function hashSessionToken(rawToken: string): string {
+  return crypto.createHash('sha256').update(rawToken).digest('hex');
+}
+
+function getMetaValue(key: string): string | null {
+  const row = db.prepare('SELECT value FROM app_meta WHERE key = ?').get(key) as { value: string } | undefined;
+  return row ? row.value : null;
+}
+
+function setMetaValue(key: string, value: string): void {
+  db.prepare('INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)').run(key, value);
+}
+
+function getAdminCredentials(): { username: string; passwordHash: string; passwordSalt: string } | null {
+  const username = getMetaValue('admin_username');
+  const passwordHash = getMetaValue('admin_password_hash');
+  const passwordSalt = getMetaValue('admin_password_salt');
+  if (!username || !passwordHash || !passwordSalt) return null;
+  return { username, passwordHash, passwordSalt };
+}
+
+function setAdminCredentials(username: string, plainPassword: string): void {
+  const { hashHex, saltHex } = hashPassword(plainPassword);
+  setMetaValue('admin_username', username.trim());
+  setMetaValue('admin_password_hash', hashHex);
+  setMetaValue('admin_password_salt', saltHex);
+  setMetaValue('auth_updated_at', new Date().toISOString());
+}
+
+// Optional bootstrap from environment variables if no credentials are stored yet
+function initAdminFromEnvIfProvided() {
+  const existing = getAdminCredentials();
+  if (existing) return;
+  const envUser = process.env.ADMIN_USERNAME?.trim();
+  const envPass = process.env.ADMIN_PASSWORD;
+  if (envUser && envPass && envPass.length >= 6) {
+    setAdminCredentials(envUser, envPass);
+    console.log(`[Auth] Initialized admin credentials for "${envUser}" from environment variables.`);
+  }
+}
+
+initAdminFromEnvIfProvided();
+
+function createAuthSession(username: string, rememberMe = true): { rawToken: string; maxAgeSec: number } {
+  const now = Date.now();
+  // Clean up expired sessions first
+  db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now);
+
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashSessionToken(rawToken);
+  const maxAgeSec = rememberMe ? 30 * 24 * 60 * 60 : 24 * 60 * 60; // 30 days or 24 hours
+  const expiresAt = now + maxAgeSec * 1000;
+
+  db.prepare(
+    'INSERT INTO auth_sessions (token_hash, username, created_at, expires_at) VALUES (?, ?, ?, ?)'
+  ).run(tokenHash, username, now, expiresAt);
+
+  return { rawToken, maxAgeSec };
+}
+
+function parseCookies(cookieHeader?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      out[k] = decodeURIComponent(v);
+    }
+  }
+  return out;
+}
+
+function extractTokenFromReq(req: express.Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) return bearer;
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies[SESSION_COOKIE_NAME]) {
+    return cookies[SESSION_COOKIE_NAME];
+  }
+  if (typeof req.query.token === 'string' && req.query.token.trim()) {
+    return req.query.token.trim();
+  }
+  return null;
+}
+
+function validateSessionFromReq(req: express.Request): { valid: boolean; username: string | null; tokenHash: string | null } {
+  const rawToken = extractTokenFromReq(req);
+  if (!rawToken) return { valid: false, username: null, tokenHash: null };
+  const tokenHash = hashSessionToken(rawToken);
+  const now = Date.now();
+  const row = db
+    .prepare('SELECT username, expires_at FROM auth_sessions WHERE token_hash = ?')
+    .get(tokenHash) as { username: string; expires_at: number } | undefined;
+
+  if (!row) return { valid: false, username: null, tokenHash: null };
+  if (row.expires_at <= now) {
+    db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash);
+    return { valid: false, username: null, tokenHash: null };
+  }
+  return { valid: true, username: row.username, tokenHash };
+}
+
+function setSessionCookie(res: express.Response, rawToken: string, maxAgeSec: number) {
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; Path=/; Max-Age=${maxAgeSec}; SameSite=Lax`
+  );
+}
+
+function clearSessionCookie(res: express.Response) {
+  res.setHeader(
+    'Set-Cookie',
+    `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`
+  );
+}
+
+// Brute-force / Rate-limit tracker per IP
+interface RateLimitRecord {
+  failures: number;
+  firstFailureAt: number;
+  lockedUntil: number;
+}
+const loginRateLimits = new Map<string, RateLimitRecord>();
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+
+function getClientIp(req: express.Request): string {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim()) {
+    return xff.split(',')[0].trim();
+  }
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function checkRateLimit(ip: string): { allowed: boolean; remainingSeconds: number } {
+  const now = Date.now();
+  const rec = loginRateLimits.get(ip);
+  if (!rec) return { allowed: true, remainingSeconds: 0 };
+  if (rec.lockedUntil > now) {
+    return {
+      allowed: false,
+      remainingSeconds: Math.ceil((rec.lockedUntil - now) / 1000),
+    };
+  }
+  if (now - rec.firstFailureAt > LOCKOUT_WINDOW_MS) {
+    loginRateLimits.delete(ip);
+  }
+  return { allowed: true, remainingSeconds: 0 };
+}
+
+function recordFailedAttempt(ip: string): { locked: boolean; attemptsLeft: number; remainingSeconds: number } {
+  const now = Date.now();
+  const existing = loginRateLimits.get(ip);
+  if (!existing || now - existing.firstFailureAt > LOCKOUT_WINDOW_MS) {
+    loginRateLimits.set(ip, {
+      failures: 1,
+      firstFailureAt: now,
+      lockedUntil: 0,
+    });
+    return { locked: false, attemptsLeft: MAX_LOGIN_ATTEMPTS - 1, remainingSeconds: 0 };
+  }
+  existing.failures += 1;
+  if (existing.failures >= MAX_LOGIN_ATTEMPTS) {
+    existing.lockedUntil = now + LOCKOUT_WINDOW_MS;
+    return {
+      locked: true,
+      attemptsLeft: 0,
+      remainingSeconds: Math.ceil(LOCKOUT_WINDOW_MS / 1000),
+    };
+  }
+  return {
+    locked: false,
+    attemptsLeft: Math.max(0, MAX_LOGIN_ATTEMPTS - existing.failures),
+    remainingSeconds: 0,
+  };
+}
+
+function clearRateLimit(ip: string) {
+  loginRateLimits.delete(ip);
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
+
+  // Health check
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  // 1. Check Authentication & Initial Setup Status
+  app.get('/api/auth/status', (req, res) => {
+    const creds = getAdminCredentials();
+    if (!creds) {
+      return res.json({
+        isSetup: false,
+        authenticated: false,
+        username: null,
+      });
+    }
+    const session = validateSessionFromReq(req);
+    return res.json({
+      isSetup: true,
+      authenticated: session.valid,
+      username: session.valid ? creds.username : null,
+    });
+  });
+
+  // 2. First-Time Security Setup (only allowed if no admin credentials exist yet)
+  app.post('/api/auth/setup', (req, res) => {
+    try {
+      const existing = getAdminCredentials();
+      if (existing) {
+        return res.status(403).json({
+          error: 'نام کاربری و رمز عبور قبلاً تعریف شده است. لطفاً وارد شوید.',
+        });
+      }
+      const { username, password, rememberMe = true } = req.body;
+      const cleanUser = String(username || '').trim();
+      const rawPass = String(password || '');
+
+      if (cleanUser.length < 3) {
+        return res.status(400).json({
+          error: 'نام کاربری باید حداقل ۳ کاراکتر باشد.',
+        });
+      }
+      if (rawPass.length < 6) {
+        return res.status(400).json({
+          error: 'رمز عبور باید حداقل ۶ کاراکتر باشد تا امنیت کافی داشته باشد.',
+        });
+      }
+
+      setAdminCredentials(cleanUser, rawPass);
+      const { rawToken, maxAgeSec } = createAuthSession(cleanUser, Boolean(rememberMe));
+      setSessionCookie(res, rawToken, maxAgeSec);
+
+      res.json({
+        ok: true,
+        token: rawToken,
+        username: cleanUser,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'خطا در ثبت اطلاعات امنیتی' });
+    }
+  });
+
+  // 3. Login with Brute-Force Protection & Constant-Time Verification
+  app.post('/api/auth/login', (req, res) => {
+    try {
+      const ip = getClientIp(req);
+      const rateCheck = checkRateLimit(ip);
+      if (!rateCheck.allowed) {
+        const mins = Math.ceil(rateCheck.remainingSeconds / 60);
+        return res.status(429).json({
+          error: `به دلیل تلاش‌های ناموفق متوالی، ورود به مدت ${mins} دقیقه مسدود شده است. لطفاً کمی صبر کنید.`,
+          lockedSeconds: rateCheck.remainingSeconds,
+        });
+      }
+
+      const creds = getAdminCredentials();
+      if (!creds) {
+        return res.status(400).json({
+          error: 'هنوز نام کاربری و رمز عبور اولیه تعریف نشده است.',
+        });
+      }
+
+      const { username, password, rememberMe = true } = req.body;
+      const inputUser = String(username || '').trim();
+      const inputPass = String(password || '');
+
+      const userMatch = timingSafeStringMatch(inputUser, creds.username);
+      const passMatch = verifyPassword(inputPass, creds.passwordHash, creds.passwordSalt);
+
+      if (!userMatch || !passMatch) {
+        const failInfo = recordFailedAttempt(ip);
+        if (failInfo.locked) {
+          return res.status(429).json({
+            error: '۵ بار تلاش ناموفق ثبت شد. ورود شما به دلایل امنیتی به مدت ۱۵ دقیقه قفل شد.',
+            lockedSeconds: failInfo.remainingSeconds,
+          });
+        }
+        return res.status(401).json({
+          error: `نام کاربری یا رمز عبور اشتباه است. (${failInfo.attemptsLeft} تلاش دیگر باقی مانده)`,
+        });
+      }
+
+      clearRateLimit(ip);
+      const { rawToken, maxAgeSec } = createAuthSession(creds.username, Boolean(rememberMe));
+      setSessionCookie(res, rawToken, maxAgeSec);
+
+      res.json({
+        ok: true,
+        token: rawToken,
+        username: creds.username,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'خطا در ورود به سیستم' });
+    }
+  });
+
+  // 4. Logout
+  app.post('/api/auth/logout', (req, res) => {
+    try {
+      const session = validateSessionFromReq(req);
+      if (session.tokenHash) {
+        db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(session.tokenHash);
+      }
+      clearSessionCookie(res);
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 5. Authentication Guard Middleware for all remaining /api/* routes
+  app.use('/api', (req, res, next) => {
+    const creds = getAdminCredentials();
+    if (!creds) {
+      return res.status(401).json({
+        error: 'لطفاً ابتدا نام کاربری و رمز عبور اولیه برنامه را تعریف کنید.',
+        requireSetup: true,
+      });
+    }
+    const session = validateSessionFromReq(req);
+    if (!session.valid) {
+      return res.status(401).json({
+        error: 'نشست امنیتی شما منقضی شده یا وارد نشده‌اید. لطفاً مجدداً وارد شوید.',
+        requireLogin: true,
+      });
+    }
+    next();
+  });
+
+  // 6. Change Username & Password (requires valid session AND current password)
+  app.post('/api/auth/change-credentials', (req, res) => {
+    try {
+      const ip = getClientIp(req);
+      const rateCheck = checkRateLimit(ip);
+      if (!rateCheck.allowed) {
+        return res.status(429).json({
+          error: 'تعداد تلاش‌های اشتباه بیش از حد مجاز است. لطفاً ۱۵ دقیقه دیگر تلاش کنید.',
+        });
+      }
+
+      const creds = getAdminCredentials();
+      if (!creds) {
+        return res.status(400).json({ error: 'حساب کاربری یافت نشد.' });
+      }
+
+      const { currentPassword, newUsername, newPassword } = req.body;
+      const cleanNewUser = String(newUsername || '').trim();
+      const rawNewPass = String(newPassword || '');
+
+      const currentPassOk = verifyPassword(
+        String(currentPassword || ''),
+        creds.passwordHash,
+        creds.passwordSalt
+      );
+      if (!currentPassOk) {
+        const failInfo = recordFailedAttempt(ip);
+        return res.status(401).json({
+          error: `رمز عبور فعلی اشتباه است. (${failInfo.attemptsLeft} تلاش باقی مانده)`,
+        });
+      }
+
+      if (cleanNewUser.length < 3) {
+        return res.status(400).json({
+          error: 'نام کاربری جدید باید حداقل ۳ کاراکتر باشد.',
+        });
+      }
+      if (rawNewPass.length < 6) {
+        return res.status(400).json({
+          error: 'رمز عبور جدید باید حداقل ۶ کاراکتر باشد.',
+        });
+      }
+
+      clearRateLimit(ip);
+      setAdminCredentials(cleanNewUser, rawNewPass);
+
+      // Invalidate all previous sessions and issue a fresh token
+      db.prepare('DELETE FROM auth_sessions').run();
+      const { rawToken, maxAgeSec } = createAuthSession(cleanNewUser, true);
+      setSessionCookie(res, rawToken, maxAgeSec);
+
+      res.json({
+        ok: true,
+        token: rawToken,
+        username: cleanNewUser,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'خطا در تغییر اطلاعات امنیتی' });
+    }
+  });
 
   app.get('/api/bootstrap', (req, res) => {
     try {
@@ -1046,10 +1558,17 @@ async function startServer() {
         if (Array.isArray(projects) && projects.length > 0) {
           db.exec('DELETE FROM projects;');
           const insPr = db.prepare(
-            'INSERT INTO projects (id, name, description, active, created_at) VALUES (?, ?, ?, ?, ?)'
+            'INSERT INTO projects (id, name, description, color, active, created_at) VALUES (?, ?, ?, ?, ?, ?)'
           );
           for (const pr of projects) {
-            insPr.run(pr.id, pr.name, pr.description ?? '', pr.active ?? 1, pr.created_at ?? '');
+            insPr.run(
+              pr.id,
+              pr.name,
+              pr.description ?? '',
+              pr.color ?? 'emerald',
+              pr.active ?? 1,
+              pr.created_at ?? ''
+            );
           }
         }
         const insW = db.prepare(
@@ -1105,6 +1624,7 @@ async function startServer() {
             insP.run(p.id, p.project_id ?? 1, p.worker_id, p.payment_date, p.shamsi_year, p.shamsi_month, p.amount, p.payment_type, p.note ?? '', p.created_at ?? '');
           }
         }
+        db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('initial_seed_done', '1')").run();
         db.exec('COMMIT;');
         res.json({ ok: true });
       } catch (innerErr) {

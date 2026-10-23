@@ -6,8 +6,12 @@ services:
     ports:
       - "${APP_PORT:-3080}:3000"
     volumes:
-      - ./data:/app/data
+      - ../karkardyar-data:/app/data
+      - ./data:/app/legacy_data
     environment:
       - NODE_ENV=production
       - PORT=3000
       - TZ=Asia/Tehran
+      - DATA_DIR=/app/data
+      - LEGACY_DATA_DIR=/app/legacy_data
+

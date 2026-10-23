@@ -11,8 +11,10 @@ import {
   Server,
   Check,
   X,
+  ShieldCheck,
 } from 'lucide-react';
 import { CalcMode, Project, Worker } from '../types';
+import { withAuthQuery } from './AuthView';
 import {
   PERSIAN_MONTHS,
   formatShamsiDayMonth,
@@ -80,6 +82,7 @@ interface WorkersViewProps {
   ) => Promise<void>;
   onDeleteWorker: (id: number) => Promise<void>;
   onRestoreBackup: (data: any) => Promise<void>;
+  onOpenSecurityModal?: () => void;
 }
 
 export const WorkersView: React.FC<WorkersViewProps> = ({
@@ -90,6 +93,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
   onSaveWorker,
   onDeleteWorker,
   onRestoreBackup,
+  onOpenSecurityModal,
 }) => {
   const todayIso = getTodayIso();
   const todayShamsi = isoToShamsi(todayIso);
@@ -555,10 +559,10 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
             <Database className="w-4 h-4 text-emerald-600" />
             <div>
               <h3 className="text-xs sm:text-sm font-extrabold text-slate-900">
-                دیتابیس SQLite و پشتیبان‌گیری روی VPS
+                دیتابیس دائمی SQLite و پشتیبان‌گیری روی VPS
               </h3>
               <p className="text-[11px] text-slate-500 font-mono-num">
-                مسیر: <code dir="ltr">./data/karkard.sqlite</code> · حجم:{' '}
+                مسیر امن خارج از گیت: <code dir="ltr">../karkardyar-data/karkard.sqlite</code> · حجم:{' '}
                 {toPersianDigits(dbFileSizeKb)} کیلوبایت
               </p>
             </div>
@@ -566,7 +570,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
 
           <div className="flex flex-wrap items-center gap-1.5">
             <a
-              href="/api/backup/sqlite"
+              href={withAuthQuery('/api/backup/sqlite')}
               download
               className="w-fit h-8 px-3 rounded-lg bg-gradient-to-l from-emerald-500 to-teal-600 text-white text-[11px] font-bold inline-flex items-center gap-1 hover:from-emerald-600 hover:to-teal-700 shadow-2xs whitespace-nowrap"
             >
@@ -575,7 +579,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
             </a>
 
             <a
-              href="/api/backup/json"
+              href={withAuthQuery('/api/backup/json')}
               download
               className="w-fit h-8 px-3 rounded-lg border border-slate-200 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1 hover:bg-slate-100 whitespace-nowrap"
             >
@@ -593,6 +597,17 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
                 className="hidden"
               />
             </label>
+
+            {onOpenSecurityModal && (
+              <button
+                type="button"
+                onClick={onOpenSecurityModal}
+                className="w-fit h-8 px-3 rounded-lg border border-emerald-200 bg-emerald-50/70 text-emerald-800 text-[11px] font-extrabold inline-flex items-center gap-1 hover:bg-emerald-100 whitespace-nowrap"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                <span>تغییر نام کاربری و رمز</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -605,13 +620,13 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
         <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600 space-y-1.5">
           <div className="flex items-center gap-1.5 font-semibold text-slate-800">
             <Server className="w-3.5 h-3.5 text-slate-600" />
-            <span>راهنمای اجرای دائمی روی سرور شخصی (VPS):</span>
+            <span>بروزرسانی امن کدها روی VPS (بدون تغییر در دیتابیس):</span>
           </div>
           <div
             dir="ltr"
             className="p-2 rounded-lg bg-slate-900 text-slate-100 font-mono text-[10px] overflow-x-auto"
           >
-            docker compose up -d --build
+            chmod +x deploy.sh && ./deploy.sh
           </div>
         </div>
       </section>

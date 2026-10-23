@@ -11,6 +11,7 @@ import {
   Trash2,
   X,
   Check,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   AttendanceStatus,
@@ -35,6 +36,13 @@ import { DailyAttendanceView } from './components/DailyAttendanceView';
 import { MonthlySheetView } from './components/MonthlySheetView';
 import { PaymentsView } from './components/PaymentsView';
 import { WorkersView } from './components/WorkersView';
+import {
+  AuthView,
+  SecurityModal,
+  getAuthHeaders,
+  setStoredAuthToken,
+  withAuthQuery,
+} from './components/AuthView';
 import {
   PROJECT_COLOR_KEYS,
   PROJECT_THEMES,
@@ -73,6 +81,13 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  // Authentication & Security State
+  const [authChecked, setAuthChecked] = useState<boolean>(false);
+  const [isAuthSetup, setIsAuthSetup] = useState<boolean>(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [currentUsername, setCurrentUsername] = useState<string>('admin');
+  const [showSecurityModal, setShowSecurityModal] = useState<boolean>(false);
+
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => {
@@ -89,7 +104,17 @@ export default function App() {
           shamsiYear: String(jy),
           shamsiMonth: String(jm),
         });
-        const res = await fetch(`/api/bootstrap?${params.toString()}`);
+        const res = await fetch(`/api/bootstrap?${params.toString()}`, {
+          headers: getAuthHeaders(),
+        });
+        if (res.status === 401) {
+          const errBody = await res.json().catch(() => ({}));
+          if (errBody.requireSetup) {
+            setIsAuthSetup(false);
+          }
+          setIsAuthenticated(false);
+          return;
+        }
         if (!res.ok) {
           throw new Error('خطا در ارتباط با سرور SQLite');
         }
@@ -115,8 +140,50 @@ export default function App() {
   );
 
   useEffect(() => {
-    fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+    const checkAuthAndLoad = async () => {
+      try {
+        const res = await fetch('/api/auth/status', {
+          headers: getAuthHeaders(),
+        });
+        if (res.ok) {
+          const status = await res.json();
+          setIsAuthSetup(Boolean(status.isSetup));
+          setIsAuthenticated(Boolean(status.authenticated));
+          if (status.username) {
+            setCurrentUsername(status.username);
+          }
+          setAuthChecked(true);
+          if (status.isSetup && status.authenticated) {
+            await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+          } else {
+            setLoading(false);
+          }
+        } else {
+          setAuthChecked(true);
+          setLoading(false);
+        }
+      } catch {
+        setAuthChecked(true);
+        setLoading(false);
+      }
+    };
+    checkAuthAndLoad();
   }, []);
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      });
+    } catch {
+      // ignore
+    }
+    setStoredAuthToken(null);
+    setShowSecurityModal(false);
+    setIsAuthenticated(false);
+    setIsAuthSetup(true);
+  };
 
   const activeProjectName = useMemo(() => {
     if (selectedProjectId === 'all') return 'همه پروژه‌ها';
@@ -261,7 +328,7 @@ export default function App() {
 
       fetch(`/api/projects/${editingProjectId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           name: updatedName,
           description: updatedDesc,
@@ -271,7 +338,7 @@ export default function App() {
     } else {
       const res = await fetch('/api/projects', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           name: projectNameInput.trim(),
           description: projectDescInput.trim(),
@@ -296,7 +363,10 @@ export default function App() {
       showToast('حداقل یک پروژه باید باقی بماند');
       return;
     }
-    const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/projects/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
     if (res.ok) {
       setConfirmDeleteProjectId(null);
       await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
@@ -364,7 +434,7 @@ export default function App() {
 
     fetch('/api/daily-log', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
     }).catch(() => {
       setErrorMsg('خطا در ذخیره خودکار');
@@ -413,7 +483,7 @@ export default function App() {
 
     fetch('/api/daily-log/bulk', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         work_date: selectedDate,
         status: 'present',
@@ -458,7 +528,7 @@ export default function App() {
 
     fetch('/api/payments', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
     })
       .then(() => fetchAllData(selectedDate, shamsiYear, shamsiMonth))
@@ -495,9 +565,10 @@ export default function App() {
   const handleDeletePayment = async (id: number) => {
     setAllPayments((prev) => prev.filter((p) => p.id !== id));
     showToast('تراکنش حذف شد');
-    fetch(`/api/payments/${id}`, { method: 'DELETE' }).catch(() =>
-      setErrorMsg('خطا در حذف تراکنش')
-    );
+    fetch(`/api/payments/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    }).catch(() => setErrorMsg('خطا در حذف تراکنش'));
   };
 
   // Optimistic 0ms worker update
@@ -562,13 +633,13 @@ export default function App() {
 
       fetch(`/api/workers/${payload.id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       }).catch(() => setErrorMsg('خطا در ذخیره اطلاعات کارگر'));
     } else {
       const res = await fetch('/api/workers', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       });
       if (res.ok) {
@@ -614,20 +685,44 @@ export default function App() {
   const handleDeleteWorker = async (id: number) => {
     setWorkers((prev) => prev.filter((w) => w.id !== id));
     showToast('کارگر حذف شد');
-    fetch(`/api/workers/${id}`, { method: 'DELETE' }).catch(() =>
-      setErrorMsg('خطا در حذف کارگر')
-    );
+    fetch(`/api/workers/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    }).catch(() => setErrorMsg('خطا در حذف کارگر'));
   };
 
   const handleRestoreBackup = async (backupData: any) => {
     const res = await fetch('/api/restore/json', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(backupData),
     });
     if (!res.ok) throw new Error('خطا در بازیابی فایل پشتیبان');
     await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
   };
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="w-12 h-12 rounded-2xl bg-emerald-100 animate-pulse" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <AuthView
+        isSetup={isAuthSetup}
+        onAuthenticated={async (username) => {
+          setCurrentUsername(username);
+          setIsAuthSetup(true);
+          setIsAuthenticated(true);
+          setLoading(true);
+          await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col text-slate-900 pb-20 md:pb-10">
@@ -706,10 +801,19 @@ export default function App() {
             </a>
           </nav>
 
-          {/* Zone 3: 1 primary action */}
-          <div className="flex items-center shrink-0">
+          {/* Zone 3: Security & SQLite Backup Actions */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setShowSecurityModal(true)}
+              className="h-8 px-2.5 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-all inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+              title="تغییر نام کاربری، رمز عبور و خروج"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>امنیت و رمز</span>
+            </button>
             <a
-              href="/api/backup/sqlite"
+              href={withAuthQuery('/api/backup/sqlite')}
               download
               className="h-8 px-3 text-[11px] font-bold text-white bg-gradient-to-l from-emerald-500 to-teal-600 rounded-lg hover:from-emerald-600 hover:to-teal-700 shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap shrink-0"
             >
@@ -883,6 +987,7 @@ export default function App() {
                 onSaveWorker={handleSaveWorker}
                 onDeleteWorker={handleDeleteWorker}
                 onRestoreBackup={handleRestoreBackup}
+                onOpenSecurityModal={() => setShowSecurityModal(true)}
               />
             )}
           </>
@@ -1128,6 +1233,18 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {showSecurityModal && (
+        <SecurityModal
+          currentUsername={currentUsername}
+          onClose={() => setShowSecurityModal(false)}
+          onCredentialsChanged={(newUser) => {
+            setCurrentUsername(newUser);
+            showToast('نام کاربری و رمز عبور بروزرسانی شد');
+          }}
+          onLogout={handleLogout}
+        />
       )}
 
       {/* Mobile Fixed Bottom Navigation Bar (Natural Thumb Zone) */}
