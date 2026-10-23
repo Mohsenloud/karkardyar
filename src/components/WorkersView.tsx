@@ -487,7 +487,8 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
             </label>
             <input
               type="number"
-              step="50000"
+              step="any"
+              min="0"
               value={baseWage}
               onChange={(e) => setBaseWage(e.target.value)}
               className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono-num"
@@ -504,7 +505,8 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
             </label>
             <input
               type="number"
-              step="10000"
+              step="any"
+              min="0"
               value={overtimeRate}
               onChange={(e) => setOvertimeRate(e.target.value)}
               className="w-full h-9 px-3 rounded-lg border border-slate-300 text-xs font-mono-num"

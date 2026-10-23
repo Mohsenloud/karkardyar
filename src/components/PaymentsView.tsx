@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Plus, Trash2, Wallet, Filter, Calendar } from 'lucide-react';
+import { Plus, Trash2, Wallet, Filter, Calendar, Edit2, Check, X } from 'lucide-react';
 import { PaymentRecord, Worker, WorkerMonthlySummary } from '../types';
 import {
   PERSIAN_MONTHS,
@@ -29,6 +29,16 @@ interface PaymentsViewProps {
     payment_type: 'advance' | 'salary' | 'deduction';
     note: string;
   }) => Promise<void>;
+  onUpdatePayment: (payload: {
+    id: number;
+    worker_id: number;
+    payment_date: string;
+    shamsi_year: number;
+    shamsi_month: number;
+    amount: number;
+    payment_type: 'advance' | 'salary' | 'deduction';
+    note: string;
+  }) => Promise<void>;
   onDeletePayment: (id: number) => Promise<void>;
 }
 
@@ -40,12 +50,14 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   summaries,
   payments,
   onAddPayment,
+  onUpdatePayment,
   onDeletePayment,
 }) => {
   const todayIso = getTodayIso();
   const initialSh = isoToShamsi(todayIso);
 
   const activeWorkers = workers.filter((w) => w.active === 1);
+  const [editingPaymentId, setEditingPaymentId] = useState<number | null>(null);
   const [workerId, setWorkerId] = useState<string>(
     activeWorkers[0] ? String(activeWorkers[0].id) : ''
   );
@@ -55,6 +67,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       setWorkerId(activeWorkers[0] ? String(activeWorkers[0].id) : '');
     }
     setFilterWorkerId('all');
+    setEditingPaymentId(null);
   }, [workers]);
 
   const [paymentType, setPaymentType] = useState<'advance' | 'salary' | 'deduction'>('advance');
@@ -69,6 +82,28 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   const selectedWorkerSummary = summaries.find((s) => s.workerId === Number(workerId));
   const monthName = PERSIAN_MONTHS[shamsiMonth - 1];
 
+  const handleStartEdit = (p: PaymentRecord) => {
+    setEditingPaymentId(p.id);
+    setWorkerId(String(p.worker_id));
+    setPaymentType(p.payment_type);
+    const sh = isoToShamsi(p.payment_date || todayIso);
+    setPayJy(sh.jy);
+    setPayJm(sh.jm);
+    setPayJd(sh.jd);
+    setAmount(String(p.amount));
+    setNote(p.note || '');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingPaymentId(null);
+    const sh = isoToShamsi(todayIso);
+    setPayJy(sh.jy);
+    setPayJm(sh.jm);
+    setPayJd(sh.jd);
+    setAmount('');
+    setNote('');
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!workerId || !amount || Number(amount) <= 0) return;
@@ -78,15 +113,29 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       const safeJd = Math.min(payJd, maxD);
       const paymentDateIso = shamsiToIso(payJy, payJm, safeJd);
 
-      await onAddPayment({
-        worker_id: Number(workerId),
-        payment_date: paymentDateIso,
-        shamsi_year: payJy,
-        shamsi_month: payJm,
-        amount: Number(amount),
-        payment_type: paymentType,
-        note: note.trim(),
-      });
+      if (editingPaymentId !== null) {
+        await onUpdatePayment({
+          id: editingPaymentId,
+          worker_id: Number(workerId),
+          payment_date: paymentDateIso,
+          shamsi_year: payJy,
+          shamsi_month: payJm,
+          amount: Number(amount),
+          payment_type: paymentType,
+          note: note.trim(),
+        });
+        setEditingPaymentId(null);
+      } else {
+        await onAddPayment({
+          worker_id: Number(workerId),
+          payment_date: paymentDateIso,
+          shamsi_year: payJy,
+          shamsi_month: payJm,
+          amount: Number(amount),
+          payment_type: paymentType,
+          note: note.trim(),
+        });
+      }
       setAmount('');
       setNote('');
     } finally {
@@ -101,16 +150,39 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-      {/* New Payment / Advance Form */}
+      {/* New / Edit Payment Form */}
       <form
         onSubmit={handleSubmit}
-        className="lg:col-span-5 bg-white border border-emerald-100 rounded-3xl p-4 sm:p-5 space-y-4 shadow-xs"
+        className={`lg:col-span-5 bg-white border rounded-3xl p-4 sm:p-5 space-y-4 shadow-xs transition-all ${
+          editingPaymentId !== null
+            ? 'border-amber-300 ring-2 ring-amber-200/70'
+            : 'border-emerald-100'
+        }`}
       >
-        <div className="flex items-center gap-2">
-          <Wallet className="w-5 h-5 text-emerald-600" />
-          <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
-            ثبت مساعده یا تسویه — «{activeProjectName}»
-          </h2>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Wallet
+              className={`w-5 h-5 ${
+                editingPaymentId !== null ? 'text-amber-600' : 'text-emerald-600'
+              }`}
+            />
+            <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+              {editingPaymentId !== null
+                ? 'ویرایش رکورد پرداختی / مساعده'
+                : `ثبت مساعده یا تسویه — «${activeProjectName}»`}
+            </h2>
+          </div>
+
+          {editingPaymentId !== null && (
+            <button
+              type="button"
+              onClick={handleCancelEdit}
+              className="w-fit h-7 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1 transition-colors"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>انصراف</span>
+            </button>
+          )}
         </div>
 
         <div>
@@ -265,10 +337,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           </div>
           <input
             type="number"
-            step="50000"
+            step="any"
+            min="1"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            placeholder="مثلاً: 2000000"
+            placeholder="هر مبلغ دلخواه (مثلاً: 1425000)"
             className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm font-mono-num focus:outline-none focus:border-emerald-600"
             required
           />
@@ -299,14 +372,39 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           />
         </div>
 
-        <button
-          type="submit"
-          disabled={submitting || !workerId || !amount}
-          className="w-full min-h-[46px] rounded-xl bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs shadow-emerald-600/20 disabled:opacity-50"
-        >
-          <Plus className="w-4 h-4" />
-          <span>ثبت در دیتابیس</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="submit"
+            disabled={submitting || !workerId || !amount}
+            className={`flex-1 min-h-[46px] rounded-xl text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-50 ${
+              editingPaymentId !== null
+                ? 'bg-gradient-to-l from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-amber-600/20'
+                : 'bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 shadow-emerald-600/20'
+            }`}
+          >
+            {editingPaymentId !== null ? (
+              <>
+                <Check className="w-4 h-4" />
+                <span>ذخیره تغییرات تراکنش</span>
+              </>
+            ) : (
+              <>
+                <Plus className="w-4 h-4" />
+                <span>ثبت در دیتابیس</span>
+              </>
+            )}
+          </button>
+
+          {editingPaymentId !== null && (
+            <button
+              type="button"
+              onClick={handleCancelEdit}
+              className="w-fit min-h-[46px] px-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold"
+            >
+              انصراف
+            </button>
+          )}
+        </div>
       </form>
 
       {/* Payments History List */}
@@ -339,53 +437,84 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
-            {filteredPayments.map((p) => (
-              <div
-                key={p.id}
-                className="py-3 flex items-center justify-between gap-3 hover:bg-slate-50/70 px-2 rounded-xl transition-colors"
-              >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-bold text-slate-900">{p.worker_name}</span>
-                    <span className="text-xs text-slate-500">
-                      ·{' '}
-                      {p.payment_type === 'advance'
-                        ? 'مساعده'
-                        : p.payment_type === 'salary'
-                        ? 'تسویه حقوق'
-                        : 'کسر / جریمه'}{' '}
-                      · {formatShamsiShort(p.payment_date)}
-                    </span>
+            {filteredPayments.map((p) => {
+              const isBeingEdited = editingPaymentId === p.id;
+              return (
+                <div
+                  key={p.id}
+                  className={`py-3 flex items-center justify-between gap-3 px-2.5 rounded-xl transition-colors ${
+                    isBeingEdited
+                      ? 'bg-amber-50/90 border border-amber-200'
+                      : 'hover:bg-slate-50/70'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-slate-900">{p.worker_name}</span>
+                      <span className="text-xs text-slate-500">
+                        ·{' '}
+                        {p.payment_type === 'advance'
+                          ? 'مساعده'
+                          : p.payment_type === 'salary'
+                          ? 'تسویه حقوق'
+                          : 'کسر / جریمه'}{' '}
+                        · {formatShamsiShort(p.payment_date)}
+                      </span>
+                      {isBeingEdited && (
+                        <span className="w-fit px-2 py-0.5 rounded-md bg-amber-200/80 text-amber-900 text-[10px] font-bold">
+                          در حال ویرایش
+                        </span>
+                      )}
+                    </div>
+                    {p.note && <p className="text-xs text-slate-500 mt-0.5">{p.note}</p>}
                   </div>
-                  {p.note && <p className="text-xs text-slate-500 mt-0.5">{p.note}</p>}
-                </div>
 
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`text-sm font-bold font-mono-num ${
-                      p.payment_type === 'deduction'
-                        ? 'text-rose-700'
-                        : p.payment_type === 'salary'
-                        ? 'text-teal-800'
-                        : 'text-amber-700'
-                    }`}
-                  >
-                    {formatToman(p.amount)} ت
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onDeletePayment(p.id)}
-                    title="حذف این تراکنش"
-                    className="min-h-[38px] min-w-[38px] rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span
+                      className={`text-sm font-bold font-mono-num ml-1 ${
+                        p.payment_type === 'deduction'
+                          ? 'text-rose-700'
+                          : p.payment_type === 'salary'
+                          ? 'text-teal-800'
+                          : 'text-amber-700'
+                      }`}
+                    >
+                      {formatToman(p.amount)} ت
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleStartEdit(p)}
+                      title="ویرایش این تراکنش"
+                      className={`min-h-[36px] px-2.5 rounded-lg text-xs font-bold inline-flex items-center gap-1 transition-colors ${
+                        isBeingEdited
+                          ? 'bg-amber-500 text-white'
+                          : 'text-slate-600 bg-slate-100 hover:bg-amber-50 hover:text-amber-700'
+                      }`}
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                      <span>ویرایش</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (editingPaymentId === p.id) {
+                          handleCancelEdit();
+                        }
+                        onDeletePayment(p.id);
+                      }}
+                      title="حذف این تراکنش"
+                      className="min-h-[36px] min-w-[36px] rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
     </div>
   );
 };
+

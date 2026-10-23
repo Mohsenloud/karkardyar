@@ -615,7 +615,8 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 </label>
                 <input
                   type="number"
-                  step="50000"
+                  step="any"
+                  min="0"
                   value={detailBonus}
                   onChange={(e) => setDetailBonus(e.target.value)}
                   placeholder="0"

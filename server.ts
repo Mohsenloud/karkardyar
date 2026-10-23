@@ -1506,6 +1506,64 @@ async function startServer() {
     }
   });
 
+  // Update payment
+  app.put('/api/payments/:id', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const existing = db.prepare('SELECT * FROM payments WHERE id = ?').get(id) as any;
+      if (!existing) {
+        return res.status(404).json({ error: 'تراکنش مورد نظر یافت نشد' });
+      }
+
+      const {
+        project_id,
+        worker_id = existing.worker_id,
+        payment_date = existing.payment_date,
+        shamsi_year,
+        shamsi_month,
+        amount = existing.amount,
+        payment_type = existing.payment_type,
+        note = existing.note,
+      } = req.body;
+
+      if (!worker_id || !amount || Number(amount) <= 0) {
+        return res.status(400).json({ error: 'انتخاب کارگر و مبلغ معتبر الزامی است' });
+      }
+
+      const iso = String(payment_date || existing.payment_date || getTodayIso());
+      const sh = isoToShamsi(iso);
+      const jy = Number(shamsi_year) || sh.jy;
+      const jm = Number(shamsi_month) || sh.jm;
+
+      const workerRow = db
+        .prepare('SELECT project_id FROM workers WHERE id = ?')
+        .get(Number(worker_id)) as any;
+      const resolvedProjectId =
+        Number(project_id) || workerRow?.project_id || existing.project_id || 1;
+
+      db.prepare(`
+        UPDATE payments
+        SET project_id = ?, worker_id = ?, payment_date = ?, shamsi_year = ?, shamsi_month = ?,
+            amount = ?, payment_type = ?, note = ?
+        WHERE id = ?
+      `).run(
+        resolvedProjectId,
+        Number(worker_id),
+        iso,
+        jy,
+        jm,
+        Number(amount) || 0,
+        payment_type || 'advance',
+        String(note || '').trim(),
+        id
+      );
+
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Delete payment
   app.delete('/api/payments/:id', (req, res) => {
     try {

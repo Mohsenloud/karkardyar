@@ -137,9 +137,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   const activeProjTheme = getProjectTheme(activeProjectColor);
 
   const [editingWorkerId, setEditingWorkerId] = useState<number | null>(null);
-  const [openCalendarWorkerId, setOpenCalendarWorkerId] = useState<number | null>(
-    workers[0]?.id ?? null
-  );
+  const [openCalendarWorkerId, setOpenCalendarWorkerId] = useState<number | null>(null);
 
   const [startJy, setStartJy] = useState<number>(1405);
   const [startJm, setStartJm] = useState<number>(7);
@@ -1360,11 +1358,11 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 </div>
                 <input
                   type="number"
-                  step="50000"
-                  min="1000"
+                  step="any"
+                  min="1"
                   value={settleAmountInput}
                   onChange={(e) => setSettleAmountInput(e.target.value)}
-                  placeholder="مبلغ را وارد کنید..."
+                  placeholder="هر مبلغ دلخواه (مثلاً 1350000)..."
                   className="w-full h-10 px-3 rounded-xl border border-slate-300 text-sm font-bold focus:outline-none focus:border-emerald-600"
                   required
                 />

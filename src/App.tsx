@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarCheck,
   CalendarRange,
@@ -12,6 +12,7 @@ import {
   X,
   Check,
   ShieldCheck,
+  ChevronDown,
 } from 'lucide-react';
 import {
   AttendanceStatus,
@@ -69,13 +70,28 @@ export default function App() {
   const [allPayments, setAllPayments] = useState<PaymentRecord[]>([]);
   const [dbFileSizeKb, setDbFileSizeKb] = useState<number>(0);
 
-  // Projects Management Modal State
+  // Projects Management Modal & Dropdown State
   const [showProjectsModal, setShowProjectsModal] = useState<boolean>(false);
+  const [showProjectDropdown, setShowProjectDropdown] = useState<boolean>(false);
+  const projectDropdownRef = useRef<HTMLDivElement | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<number | null>(null);
   const [projectNameInput, setProjectNameInput] = useState<string>('');
   const [projectDescInput, setProjectDescInput] = useState<string>('');
   const [projectColorInput, setProjectColorInput] = useState<ProjectColorKey>('violet');
   const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<number | null>(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (ev: MouseEvent) => {
+      if (
+        projectDropdownRef.current &&
+        !projectDropdownRef.current.contains(ev.target as Node)
+      ) {
+        setShowProjectDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, []);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -562,6 +578,50 @@ export default function App() {
     });
   };
 
+  const handleUpdatePayment = async (payload: {
+    id: number;
+    worker_id: number;
+    payment_date: string;
+    shamsi_year: number;
+    shamsi_month: number;
+    amount: number;
+    payment_type: 'advance' | 'salary' | 'deduction';
+    note: string;
+  }) => {
+    const w = workers.find((x) => x.id === payload.worker_id);
+    const resolvedProjectId =
+      w?.project_id || (selectedProjectId === 'all' ? 1 : selectedProjectId);
+
+    setAllPayments((prev) =>
+      prev.map((p) =>
+        p.id === payload.id
+          ? {
+              ...p,
+              project_id: resolvedProjectId,
+              worker_id: payload.worker_id,
+              worker_name: w?.name || p.worker_name,
+              worker_role: w?.role || p.worker_role,
+              payment_date: payload.payment_date,
+              shamsi_year: payload.shamsi_year,
+              shamsi_month: payload.shamsi_month,
+              amount: payload.amount,
+              payment_type: payload.payment_type,
+              note: payload.note,
+            }
+          : p
+      )
+    );
+    showToast('تراکنش ویرایش شد');
+
+    fetch(`/api/payments/${payload.id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
+    })
+      .then(() => fetchAllData(selectedDate, shamsiYear, shamsiMonth))
+      .catch(() => setErrorMsg('خطا در ویرایش تراکنش'));
+  };
+
   const handleDeletePayment = async (id: number) => {
     setAllPayments((prev) => prev.filter((p) => p.id !== id));
     showToast('تراکنش حذف شد');
@@ -826,59 +886,144 @@ export default function App() {
 
       {/* Main Content Container */}
       <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-5 pt-3 sm:pt-4 space-y-3.5">
-        {/* Project Selector & Management Bar — Modern Per-Project Color Pills */}
-        <section className="bg-white/90 backdrop-blur-md border border-slate-200/80 rounded-2xl p-2.5 sm:p-3 flex flex-wrap items-center justify-between gap-2 shadow-xs no-print">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-bold text-slate-500 ml-1 inline-flex items-center gap-1">
+        {/* Project Selector & Management Bar — Compact Dropdown for Mobile & Desktop */}
+        <section className="relative z-30 bg-white/95 backdrop-blur-md border border-slate-200/80 rounded-2xl p-2.5 sm:px-3.5 sm:py-2.5 flex items-center justify-between gap-2 shadow-xs no-print">
+          <div className="flex items-center gap-2 min-w-0" ref={projectDropdownRef}>
+            <span className="hidden xs:inline-flex sm:inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 shrink-0">
               <FolderKanban className="w-3.5 h-3.5 text-slate-600" />
               <span>پروژه:</span>
             </span>
 
-            {projects.map((pr, idx) => {
-              const isSelected = selectedProjectId === pr.id;
-              const prTheme = getProjectTheme(pr.color, idx);
-              const prWorkersCount = workers.filter(
-                (w) => (w.project_id || 1) === pr.id
-              ).length;
-              return (
-                <button
-                  key={pr.id}
-                  type="button"
-                  onClick={() => setSelectedProjectId(pr.id)}
-                  className={`w-fit h-8 px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 transition-all whitespace-nowrap active:scale-95 ${
-                    isSelected ? prTheme.activeTabBtn : prTheme.inactiveTabBtn
-                  }`}
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      isSelected ? 'bg-white' : prTheme.dotClass
-                    }`}
-                  />
-                  <span>{pr.name}</span>
-                  <span
-                    className={`px-1.5 py-0.2 rounded-md text-[10px] font-mono-num ${
-                      isSelected ? 'bg-white/20 text-white' : 'bg-white/90 text-slate-700'
+            <div className="relative">
+              {(() => {
+                const isAll = selectedProjectId === 'all';
+                const activeIdx = projects.findIndex((p) => p.id === selectedProjectId);
+                const activePr = activeIdx >= 0 ? projects[activeIdx] : undefined;
+                const activeTheme = getProjectTheme(
+                  activePr?.color,
+                  Math.max(0, activeIdx)
+                );
+                const activeCount = isAll
+                  ? workers.length
+                  : workers.filter((w) => (w.project_id || 1) === selectedProjectId)
+                      .length;
+
+                return (
+                  <button
+                    type="button"
+                    onClick={() => setShowProjectDropdown((prev) => !prev)}
+                    className={`h-9 px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-2 transition-all whitespace-nowrap shadow-2xs ${
+                      isAll
+                        ? 'bg-slate-800 text-white hover:bg-slate-700'
+                        : activeTheme.activeTabBtn
                     }`}
                   >
-                    {toPersianDigits(prWorkersCount)}
-                  </span>
-                </button>
-              );
-            })}
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                        isAll ? 'bg-emerald-400' : 'bg-white ring-2 ring-white/30'
+                      }`}
+                    />
+                    <span className="truncate max-w-[140px] sm:max-w-[220px]">
+                      {activeProjectName}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono-num bg-white/20 text-white shrink-0">
+                      {toPersianDigits(activeCount)} نفر
+                    </span>
+                    <ChevronDown
+                      className={`w-3.5 h-3.5 shrink-0 transition-transform duration-200 ${
+                        showProjectDropdown ? 'rotate-180' : ''
+                      }`}
+                    />
+                  </button>
+                );
+              })()}
 
-            {projects.length > 1 && (
-              <button
-                type="button"
-                onClick={() => setSelectedProjectId('all')}
-                className={`w-fit h-8 px-2.5 rounded-xl text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
-                  selectedProjectId === 'all'
-                    ? 'bg-slate-800 text-white shadow-xs'
-                    : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
-                }`}
-              >
-                <span>همه پروژه‌ها ({toPersianDigits(workers.length)})</span>
-              </button>
-            )}
+              {/* Dropdown Menu List */}
+              {showProjectDropdown && (
+                <div className="absolute right-0 top-full mt-1.5 z-50 w-64 sm:w-72 bg-white border border-slate-200/90 rounded-2xl shadow-xl p-1.5 space-y-1 animate-in fade-in zoom-in-95 duration-150">
+                  <div className="px-2.5 py-1 text-[10px] font-bold text-slate-400 flex items-center justify-between">
+                    <span>انتخاب پروژه فعال</span>
+                    <span>تعداد کارگر</span>
+                  </div>
+
+                  <div className="max-h-60 overflow-y-auto space-y-1 pr-0.5">
+                    {projects.map((pr, idx) => {
+                      const isSelected = selectedProjectId === pr.id;
+                      const prTheme = getProjectTheme(pr.color, idx);
+                      const prWorkersCount = workers.filter(
+                        (w) => (w.project_id || 1) === pr.id
+                      ).length;
+
+                      return (
+                        <button
+                          key={pr.id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedProjectId(pr.id);
+                            setShowProjectDropdown(false);
+                          }}
+                          className={`w-full h-9 px-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-all ${
+                            isSelected
+                              ? `${prTheme.lightBg} ${prTheme.lightText} border ${prTheme.lightBorder}`
+                              : 'text-slate-700 hover:bg-slate-50 border border-transparent'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span
+                              className={`w-2.5 h-2.5 rounded-full shrink-0 ${prTheme.dotClass}`}
+                            />
+                            <span className="truncate font-extrabold">{pr.name}</span>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[10px] font-mono-num font-bold">
+                              {toPersianDigits(prWorkersCount)} نفر
+                            </span>
+                            {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {projects.length > 1 && (
+                    <div className="pt-1 border-t border-slate-100">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedProjectId('all');
+                          setShowProjectDropdown(false);
+                        }}
+                        className={`w-full h-9 px-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-all ${
+                          selectedProjectId === 'all'
+                            ? 'bg-slate-900 text-white'
+                            : 'text-slate-700 hover:bg-slate-100'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shrink-0" />
+                          <span className="font-extrabold">همه پروژه‌ها (مجموع)</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-bold ${
+                              selectedProjectId === 'all'
+                                ? 'bg-white/20 text-white'
+                                : 'bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            {toPersianDigits(workers.length)} نفر
+                          </span>
+                          {selectedProjectId === 'all' && (
+                            <Check className="w-3.5 h-3.5 shrink-0" />
+                          )}
+                        </div>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           <button
@@ -892,7 +1037,7 @@ export default function App() {
               setProjectColorInput(nextColor);
               setShowProjectsModal(true);
             }}
-            className="w-fit h-8 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-extrabold inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 shadow-2xs"
+            className="w-fit h-9 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-extrabold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-2xs"
           >
             <Plus className="w-3.5 h-3.5 text-emerald-300" />
             <span>تعریف و حساب پروژه‌ها</span>
@@ -974,6 +1119,7 @@ export default function App() {
                 summaries={summaries}
                 payments={payments}
                 onAddPayment={handleAddPayment}
+                onUpdatePayment={handleUpdatePayment}
                 onDeletePayment={handleDeletePayment}
               />
             )}
