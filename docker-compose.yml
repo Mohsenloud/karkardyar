@@ -1,0 +1,13 @@
+services:
+  karkardyar:
+    build: .
+    container_name: karkardyar-app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3080}:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - TZ=Asia/Tehran

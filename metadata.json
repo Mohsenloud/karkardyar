@@ -1,0 +1,6 @@
+{
+  "name": "کارکردیار — سامانه ثبت کارکرد و حسابرسی کارگران",
+  "description": "برنامه ساده، مدرن و سریع برای ثبت کارکرد روزانه و ماهانه کارگران، محاسبه دستمزد، اضافه‌کاری و مساعده با دیتابیس SQLite",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
