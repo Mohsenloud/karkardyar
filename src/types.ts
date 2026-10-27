@@ -31,6 +31,7 @@ export interface Worker {
   manual_absent_days: number;         // تعداد روز غیبت/کسری دستی
   manual_overtime_hours: number | null; // ساعت اضافه‌کاری دستی
   auto_count_days: number;
+  fridays_off?: number;               // ۱ = تعطیلی خودکار جمعه‌ها (ویژه روزمزد)، ۰ = عادی
   active: number;
   notes: string;
   created_at?: string;
@@ -50,6 +51,7 @@ export interface AccruedToTodaySummary {
   calendarAbsentDays: number;         // غیبت‌های ثبت‌شده در تقویم
   manualAbsentDays: number;           // غیبت‌های کسرشده دستی
   totalAbsentDays: number;            // مجموع غیبت‌ها
+  fridaysOffCount?: number;           // تعداد جمعه‌های تعطیل کسرشده
   halfDaysCount: number;
   rawCalculatedDays: number;          // روز کارکرد طبق تقویم (قبل از عدد دستی)
   effectiveDaysToToday: number;       // روز کارکرد نهایی (محاسبه‌شده یا ویرایش‌شده توسط کاربر)

@@ -70,6 +70,24 @@ export default function App() {
   const [allPayments, setAllPayments] = useState<PaymentRecord[]>([]);
   const [dbFileSizeKb, setDbFileSizeKb] = useState<number>(0);
 
+  // Worker display mode: 'card' (2-col grid) or 'row' (horizontal rows)
+  const [workerViewMode, setWorkerViewMode] = useState<'card' | 'row'>(() => {
+    try {
+      return localStorage.getItem('karkard_worker_view_mode') === 'row' ? 'row' : 'card';
+    } catch {
+      return 'card';
+    }
+  });
+
+  const handleChangeWorkerViewMode = (mode: 'card' | 'row') => {
+    setWorkerViewMode(mode);
+    try {
+      localStorage.setItem('karkard_worker_view_mode', mode);
+    } catch {
+      // ignore
+    }
+  };
+
   // Projects Management Modal & Dropdown State
   const [showProjectsModal, setShowProjectsModal] = useState<boolean>(false);
   const [showProjectDropdown, setShowProjectDropdown] = useState<boolean>(false);
@@ -648,6 +666,7 @@ export default function App() {
     manual_absent_days?: number;
     manual_overtime_hours?: number | null;
     auto_count_days: number;
+    fridays_off?: number;
     active: number;
     notes: string;
   }) => {
@@ -684,6 +703,10 @@ export default function App() {
                     ? payload.manual_overtime_hours
                     : w.manual_overtime_hours,
                 auto_count_days: payload.auto_count_days,
+                fridays_off:
+                  payload.fridays_off !== undefined
+                    ? payload.fridays_off
+                    : w.fridays_off ?? 0,
                 active: payload.active,
                 notes: payload.notes,
               }
@@ -719,6 +742,7 @@ export default function App() {
       manual_absent_days: number;
       manual_overtime_hours: number | null;
       auto_count_days: number;
+      fridays_off?: number;
     }
   ) => {
     handleSaveWorker({
@@ -737,9 +761,50 @@ export default function App() {
       manual_absent_days: updates.manual_absent_days,
       manual_overtime_hours: updates.manual_overtime_hours,
       auto_count_days: updates.auto_count_days,
+      fridays_off:
+        updates.fridays_off !== undefined ? updates.fridays_off : worker.fridays_off ?? 0,
       active: worker.active,
       notes: worker.notes,
     });
+  };
+
+  // Toggle Friday holiday mode for all daily-wage workers in the active project
+  const handleToggleAllDailyWorkersFridaysOff = (enabled: boolean) => {
+    const dailyInProject = projectWorkers.filter((w) => w.wage_type === 'daily');
+    if (dailyInProject.length === 0) return;
+
+    const targetIds = new Set(dailyInProject.map((w) => w.id));
+    const flag = enabled ? 1 : 0;
+
+    setWorkers((prev) =>
+      prev.map((w) =>
+        targetIds.has(w.id)
+          ? {
+              ...w,
+              fridays_off: flag,
+              manual_worked_days: null,
+            }
+          : w
+      )
+    );
+
+    showToast(
+      enabled
+        ? 'جمعه‌ها برای کارگران روزمزد تعطیل در نظر گرفته شد'
+        : 'جمعه‌ها به حالت کاری عادی برگشت'
+    );
+
+    for (const w of dailyInProject) {
+      fetch(`/api/workers/${w.id}`, {
+        method: 'PUT',
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          ...w,
+          fridays_off: flag,
+          manual_worked_days: null,
+        }),
+      }).catch(() => {});
+    }
   };
 
   const handleDeleteWorker = async (id: number) => {
@@ -1088,6 +1153,9 @@ export default function App() {
                 accruedSummaries={accruedSummaries}
                 monthLogs={monthLogs}
                 payments={payments}
+                viewMode={workerViewMode}
+                onChangeViewMode={handleChangeWorkerViewMode}
+                onToggleAllDailyFridaysOff={handleToggleAllDailyWorkersFridaysOff}
                 onSaveDailyLog={handleSaveDailyLog}
                 onSaveWorkerRangeAndDays={handleSaveWorkerRangeAndDays}
                 onQuickSettleWorker={handleQuickSettleWorker}
@@ -1102,6 +1170,8 @@ export default function App() {
                 workers={projectWorkers}
                 dailyLogs={dailyLogs}
                 accruedSummaries={accruedSummaries}
+                viewMode={workerViewMode}
+                onChangeViewMode={handleChangeWorkerViewMode}
                 onSaveDailyLog={handleSaveDailyLog}
                 onBulkMarkPresent={handleBulkMarkPresent}
                 onOpenNewWorker={() => setActiveTab('workers')}

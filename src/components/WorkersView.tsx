@@ -76,6 +76,7 @@ interface WorkersViewProps {
       manual_absent_days?: number;
       manual_overtime_hours?: number | null;
       auto_count_days: number;
+      fridays_off?: number;
       active: number;
       notes: string;
     }
@@ -132,6 +133,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
 
   const [manualWorkedDays, setManualWorkedDays] = useState<string>('');
   const [autoCountDays, setAutoCountDays] = useState<number>(1);
+  const [fridaysOff, setFridaysOff] = useState<boolean>(false);
   const [active, setActive] = useState(1);
   const [notes, setNotes] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
@@ -155,6 +157,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
     setEndJd(23);
     setManualWorkedDays('');
     setAutoCountDays(1);
+    setFridaysOff(false);
     setActive(1);
     setNotes('');
   };
@@ -190,6 +193,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
         : ''
     );
     setAutoCountDays(w.auto_count_days ?? 1);
+    setFridaysOff(Boolean(w.fridays_off));
     setActive(w.active);
     setNotes(w.notes || '');
     setShowWorkersListModal(false);
@@ -222,6 +226,7 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
       manual_worked_days:
         manualWorkedDays.trim() === '' ? null : Math.max(0, Number(manualWorkedDays)),
       auto_count_days: autoCountDays,
+      fridays_off: wageType === 'daily' && fridaysOff ? 1 : 0,
       active,
       notes: notes.trim(),
     });
@@ -479,6 +484,23 @@ export const WorkersView: React.FC<WorkersViewProps> = ({
             </button>
           </div>
         </div>
+
+        {wageType === 'daily' && (
+          <label className="flex items-center gap-2 p-2.5 rounded-xl bg-orange-50/70 border border-orange-200/80 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={fridaysOff}
+              onChange={(e) => setFridaysOff(e.target.checked)}
+              className="w-4 h-4 rounded text-orange-600 focus:ring-0 cursor-pointer"
+            />
+            <div className="text-[11px] text-orange-950">
+              <span className="font-extrabold block">تعطیلی خودکار جمعه‌ها (ویژه روزمزد)</span>
+              <span className="text-[10px] text-orange-800">
+                با تیک زدن، جمعه‌ها تعطیل (۰ روز) محاسبه می‌شود و اگر کارگر جمعه‌ای کار کرد می‌توانید دستی آن را فعال کنید.
+              </span>
+            </div>
+          </label>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>

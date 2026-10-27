@@ -184,6 +184,12 @@ export function getShamsiMonthLength(jy: number, jm: number): number {
   return isLeap ? 30 : 29;
 }
 
+export function isFridayIso(isoDate: string): boolean {
+  const [y, m, d] = (isoDate || '').split('-').map(Number);
+  if (!y || !m || !d) return false;
+  return new Date(y, m - 1, d).getDay() === 5;
+}
+
 export function getWeekdayName(isoDate: string, short = false): string {
   const [y, m, d] = isoDate.split('-').map(Number);
   const dt = new Date(y, m - 1, d);

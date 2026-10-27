@@ -12,6 +12,8 @@ import {
   RotateCcw,
   UserPlus,
   Edit3,
+  LayoutGrid,
+  LayoutList,
 } from 'lucide-react';
 import { AccruedToTodaySummary, AttendanceStatus, DailyLog, Worker } from '../types';
 import {
@@ -22,6 +24,7 @@ import {
   getDaysWindow,
   getShamsiMonthLength,
   getTodayIso,
+  isFridayIso,
   isoToShamsi,
   shamsiToIso,
   toPersianDigits,
@@ -61,6 +64,8 @@ interface DailyAttendanceViewProps {
   workers: Worker[];
   dailyLogs: DailyLog[];
   accruedSummaries: AccruedToTodaySummary[];
+  viewMode?: 'card' | 'row';
+  onChangeViewMode?: (mode: 'card' | 'row') => void;
   onSaveDailyLog: (payload: {
     worker_id: number;
     work_date: string;
@@ -83,6 +88,8 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   workers,
   dailyLogs,
   accruedSummaries,
+  viewMode = 'card',
+  onChangeViewMode,
   onSaveDailyLog,
   onBulkMarkPresent,
   onOpenNewWorker,
@@ -92,6 +99,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   const activeWorkers = workers.filter((w) => w.active === 1);
   const daysStrip = getDaysWindow(selectedDate, 3);
   const currentShamsi = isoToShamsi(selectedDate);
+  const isSelectedDateFriday = isFridayIso(selectedDate);
 
   const [expandedWorkerId, setExpandedWorkerId] = useState<number | null>(null);
   const [defaultProject, setDefaultProject] = useState<string>('');
@@ -199,12 +207,17 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             >
               <ChevronRight className="w-4 h-4" />
             </button>
-            <div className="flex items-center gap-1 px-1">
+            <div className="flex items-center gap-1.5 px-1">
               <h2 className="text-xs sm:text-sm font-extrabold text-slate-900">
                 {formatShamsiFull(selectedDate)}
               </h2>
               {selectedDate === todayIso && (
                 <span className="text-[11px] font-bold text-emerald-600">· امروز</span>
+              )}
+              {isSelectedDateFriday && (
+                <span className="w-fit px-2 py-0.5 rounded-md bg-orange-50 text-orange-800 border border-orange-200 text-[10px] font-bold">
+                  جمعه
+                </span>
               )}
             </div>
             <button
@@ -217,7 +230,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             </button>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {selectedDate !== todayIso && (
               <button
                 type="button"
@@ -250,6 +263,36 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
               <CheckCheck className="w-3.5 h-3.5" />
               <span>حضور همه</span>
             </button>
+
+            {/* View Mode Toggle */}
+            <div className="flex items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
+              <button
+                type="button"
+                onClick={() => onChangeViewMode?.('card')}
+                className={`w-fit h-7 px-2 rounded-md text-[10px] font-bold inline-flex items-center gap-1 transition-all ${
+                  viewMode === 'card'
+                    ? 'bg-white text-emerald-700 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="نمای کارتی"
+              >
+                <LayoutGrid className="w-3 h-3" />
+                <span>کارتی</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeViewMode?.('row')}
+                className={`w-fit h-7 px-2 rounded-md text-[10px] font-bold inline-flex items-center gap-1 transition-all ${
+                  viewMode === 'row'
+                    ? 'bg-white text-emerald-700 shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="نمای ردیفی"
+              >
+                <LayoutList className="w-3 h-3" />
+                <span>ردیفی</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -287,7 +330,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
         </div>
       </section>
 
-      {/* Workers Attendance List — Compact Cards & Non-Stretched Buttons */}
+      {/* Workers Attendance List — Supports both 'card' and 'row' layouts */}
       {activeWorkers.length === 0 ? (
         <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center">
           <p className="text-xs text-slate-600 mb-3">
@@ -302,6 +345,146 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             <span>افزودن اولین کارگر</span>
           </button>
         </div>
+      ) : viewMode === 'row' ? (
+        <div className="space-y-1.5">
+          {activeWorkers.map((worker, index) => {
+            const theme = WORKER_LIGHT_THEMES[index % WORKER_LIGHT_THEMES.length];
+            const log = getWorkerLog(worker.id);
+
+            const isWithinAutoActiveRange =
+              worker.auto_count_days !== 0 &&
+              selectedDate >= (worker.start_date || '') &&
+              selectedDate <= todayIso &&
+              (!worker.end_date || selectedDate <= worker.end_date);
+
+            const isAutoFridayHoliday =
+              isSelectedDateFriday &&
+              worker.wage_type === 'daily' &&
+              Boolean(worker.fridays_off) &&
+              !log;
+
+            const currentStatus: AttendanceStatus | undefined = log?.status
+              ? log.status
+              : isAutoFridayHoliday
+              ? 'absent'
+              : isWithinAutoActiveRange
+              ? 'present'
+              : undefined;
+            const currentOvertime = log ? Number(log.overtime_hours || 0) : 0;
+
+            return (
+              <div
+                key={worker.id}
+                className="bg-white border border-slate-200/90 hover:border-emerald-300 rounded-xl px-3 py-2 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 shadow-2xs transition-all"
+              >
+                {/* 1. Worker Identity */}
+                <div className="flex items-center gap-2 min-w-0 flex-1 sm:min-w-[150px]">
+                  <div
+                    className={`w-7 h-7 rounded-lg ${theme.avatarBg} font-extrabold text-xs flex items-center justify-center shrink-0`}
+                  >
+                    {worker.name.trim().charAt(0)}
+                  </div>
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 truncate">
+                      {worker.name}
+                    </h3>
+                    <span className="text-[10px] text-slate-400 truncate hidden md:inline">
+                      ({worker.role})
+                    </span>
+                    {isAutoFridayHoliday && (
+                      <span className="w-fit px-1.5 py-0.5 rounded bg-orange-50 text-orange-700 border border-orange-200 text-[9px] font-bold shrink-0">
+                        جمعه تعطیل
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* 2. Unified Status Segmented Control */}
+                <div className="inline-flex items-center bg-slate-100 p-0.5 rounded-lg gap-0.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleQuickStatus(worker, 'present')}
+                    className={`w-fit h-6 px-2.5 rounded-md text-[10px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
+                      currentStatus === 'present'
+                        ? 'bg-emerald-600 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <span>حاضر</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleQuickStatus(worker, 'paid_leave')}
+                    className={`w-fit h-6 px-2 rounded-md text-[10px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
+                      currentStatus === 'paid_leave'
+                        ? 'bg-sky-600 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <span>مرخصی</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleQuickStatus(worker, 'absent')}
+                    className={`w-fit h-6 px-2 rounded-md text-[10px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
+                      currentStatus === 'absent'
+                        ? isAutoFridayHoliday
+                          ? 'bg-orange-500 text-white shadow-2xs'
+                          : 'bg-rose-600 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <span>{isAutoFridayHoliday ? 'تعطیل' : 'غایب'}</span>
+                  </button>
+                </div>
+
+                {/* 3. Compact Overtime Stepper + Note Icon */}
+                <div className="flex items-center gap-1.5 font-mono-num shrink-0">
+                  <div className="flex items-center gap-1 bg-slate-50 border border-slate-200/80 rounded-lg p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => handleOvertimeDelta(worker, -1)}
+                      disabled={currentOvertime <= 0}
+                      title="کسر ۱ ساعت اضافه‌کار"
+                      className="h-6 w-6 rounded-md hover:bg-rose-100 flex items-center justify-center text-rose-600 disabled:opacity-30 transition-colors"
+                    >
+                      <Minus className="w-3 h-3" />
+                    </button>
+                    <span
+                      title="ساعت اضافه‌کار"
+                      className="text-[11px] font-extrabold text-slate-800 px-1 whitespace-nowrap"
+                    >
+                      {toPersianDigits(currentOvertime)}س
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleOvertimeDelta(worker, 1)}
+                      title="افزودن ۱ ساعت اضافه‌کار"
+                      className="h-6 w-6 rounded-md hover:bg-emerald-100 flex items-center justify-center text-emerald-600 transition-colors"
+                    >
+                      <Plus className="w-3 h-3" />
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleToggleExpand(worker)}
+                    title="یادداشت و پاداش روزانه"
+                    className={`w-7 h-7 rounded-lg inline-flex items-center justify-center transition-colors ${
+                      log?.note || log?.bonus_amount
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-start">
           {activeWorkers.map((worker, index) => {
@@ -315,8 +498,19 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
               selectedDate <= todayIso &&
               (!worker.end_date || selectedDate <= worker.end_date);
 
-            const currentStatus: AttendanceStatus | undefined =
-              log?.status ?? (isWithinAutoActiveRange ? 'present' : undefined);
+            const isAutoFridayHoliday =
+              isSelectedDateFriday &&
+              worker.wage_type === 'daily' &&
+              Boolean(worker.fridays_off) &&
+              !log;
+
+            const currentStatus: AttendanceStatus | undefined = log?.status
+              ? log.status
+              : isAutoFridayHoliday
+              ? 'absent'
+              : isWithinAutoActiveRange
+              ? 'present'
+              : undefined;
             const currentOvertime = log ? Number(log.overtime_hours || 0) : 0;
 
             return (
@@ -333,9 +527,16 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       {worker.name.trim().charAt(0)}
                     </div>
                     <div className="min-w-0">
-                      <h3 className="text-sm font-extrabold text-slate-900 truncate">
-                        {worker.name}
-                      </h3>
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="text-sm font-extrabold text-slate-900 truncate">
+                          {worker.name}
+                        </h3>
+                        {isAutoFridayHoliday && (
+                          <span className="w-fit px-1.5 py-0.5 rounded bg-orange-50 text-orange-800 border border-orange-200 text-[9px] font-bold shrink-0">
+                            جمعه تعطیل
+                          </span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-slate-600 font-mono-num truncate">
                         {worker.role} ·{' '}
                         {worker.wage_type === 'daily'
@@ -411,11 +612,13 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       onClick={() => handleQuickStatus(worker, 'absent')}
                       className={`w-fit h-8 px-3 rounded-lg text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-all active:scale-95 whitespace-nowrap ${
                         currentStatus === 'absent'
-                          ? 'bg-gradient-to-l from-rose-500 to-red-600 text-white shadow-2xs'
+                          ? isAutoFridayHoliday
+                            ? 'bg-orange-500 text-white shadow-2xs'
+                            : 'bg-gradient-to-l from-rose-500 to-red-600 text-white shadow-2xs'
                           : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                       }`}
                     >
-                      <span>غایب (۰)</span>
+                      <span>{isAutoFridayHoliday ? 'تعطیل جمعه (۰)' : 'غایب (۰)'}</span>
                     </button>
                   </div>
 

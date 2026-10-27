@@ -5,7 +5,7 @@ import {
   Worker,
   WorkerMonthlySummary,
 } from '../types';
-import { addDaysIso, isoToShamsi, shamsiToIso } from './jalali';
+import { addDaysIso, isFridayIso, isoToShamsi, shamsiToIso } from './jalali';
 
 export function diffDaysInclusive(startIso: string, endIso: string): number {
   if (!startIso || !endIso || startIso > endIso) return 0;
@@ -14,6 +14,33 @@ export function diffDaysInclusive(startIso: string, endIso: string): number {
   const utc1 = Date.UTC(y1, m1 - 1, d1);
   const utc2 = Date.UTC(y2, m2 - 1, d2);
   return Math.floor((utc2 - utc1) / (1000 * 60 * 60 * 24)) + 1;
+}
+
+export function countUnloggedFridaysBetween(
+  startIso: string,
+  endIso: string,
+  loggedDatesSet: Set<string>
+): number {
+  if (!startIso || !endIso || startIso > endIso) return 0;
+  const [y1, m1, d1] = startIso.split('-').map(Number);
+  const [y2, m2, d2] = endIso.split('-').map(Number);
+  const cur = new Date(y1, m1 - 1, d1);
+  const end = new Date(y2, m2 - 1, d2);
+  let fridays = 0;
+  let guard = 0;
+  while (cur <= end && guard < 1500) {
+    if (cur.getDay() === 5) {
+      const iso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(
+        cur.getDate()
+      ).padStart(2, '0')}`;
+      if (!loggedDatesSet.has(iso)) {
+        fridays++;
+      }
+    }
+    cur.setDate(cur.getDate() + 1);
+    guard++;
+  }
+  return fridays;
 }
 
 export function computeWorkerAccruedSummary(
@@ -27,6 +54,7 @@ export function computeWorkerAccruedSummary(
   const endDate: string | null = w.end_date || null;
   const calcMode = w.calc_mode || 'to_today';
   const autoCount = w.auto_count_days !== 0;
+  const isFridaysOffEnabled = w.wage_type === 'daily' && Boolean(w.fridays_off);
 
   const targetEndIso =
     calcMode === 'full_range' && endDate
@@ -72,6 +100,17 @@ export function computeWorkerAccruedSummary(
   );
 
   const logsInCalcWindow = periodLogs.filter((l) => l.work_date <= targetEndIso);
+  const loggedDatesSet = new Set(logsInCalcWindow.map((l) => l.work_date));
+
+  const unloggedFridays =
+    !notStartedYet && isFridaysOffEnabled
+      ? countUnloggedFridaysBetween(startDate, targetEndIso, loggedDatesSet)
+      : 0;
+  const explicitAbsentFridays =
+    !notStartedYet && isFridaysOffEnabled
+      ? logsInCalcWindow.filter((l) => isFridayIso(l.work_date) && l.status === 'absent').length
+      : 0;
+  const fridaysOffCount = unloggedFridays + explicitAbsentFridays;
 
   const calendarAbsentDays = logsInCalcWindow.filter((l) => l.status === 'absent').length;
   const halfDaysCount = logsInCalcWindow.filter((l) => l.status === 'half').length;
@@ -86,7 +125,7 @@ export function computeWorkerAccruedSummary(
         (s, l) => s + Number(l.days_equiv || 0),
         0
       );
-      const unloggedDays = Math.max(0, activeWindowDays - loggedDatesCount);
+      const unloggedDays = Math.max(0, activeWindowDays - loggedDatesCount - unloggedFridays);
       rawCalculatedDays = Math.max(0, unloggedDays + loggedDaysSum - manualAbsentDays);
     } else {
       rawCalculatedDays = Math.max(
@@ -160,6 +199,7 @@ export function computeWorkerAccruedSummary(
     calendarAbsentDays,
     manualAbsentDays,
     totalAbsentDays,
+    fridaysOffCount,
     halfDaysCount,
     rawCalculatedDays,
     effectiveDaysToToday,
@@ -216,12 +256,17 @@ export function computeWorkerMonthlySummary(
   const logsInActiveRange = wLogs.filter(
     (l) => l.work_date >= activeRangeStart && l.work_date <= activeRangeEnd
   );
+  const isFridaysOffEnabled = w.wage_type === 'daily' && Boolean(w.fridays_off);
 
   let loggedDays = 0;
   if (w.auto_count_days !== 0 && activeRangeStart <= activeRangeEnd) {
     const elapsedInMonth = Math.max(0, diffDaysInclusive(activeRangeStart, activeRangeEnd));
+    const loggedDatesSet = new Set(logsInActiveRange.map((l) => l.work_date));
+    const unloggedFridays = isFridaysOffEnabled
+      ? countUnloggedFridaysBetween(activeRangeStart, activeRangeEnd, loggedDatesSet)
+      : 0;
     const sumLogged = logsInActiveRange.reduce((s, l) => s + Number(l.days_equiv || 0), 0);
-    const unloggedCount = Math.max(0, elapsedInMonth - logsInActiveRange.length);
+    const unloggedCount = Math.max(0, elapsedInMonth - logsInActiveRange.length - unloggedFridays);
     loggedDays = unloggedCount + sumLogged;
   } else {
     loggedDays = wLogs.reduce((sum, l) => sum + Number(l.days_equiv || 0), 0);

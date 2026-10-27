@@ -12,6 +12,8 @@ import {
   ChevronDown,
   ChevronUp,
   SlidersHorizontal,
+  LayoutGrid,
+  LayoutList,
 } from 'lucide-react';
 import {
   AccruedToTodaySummary,
@@ -31,6 +33,7 @@ import {
   getIsoDatesBetween,
   getShamsiMonthLength,
   getTodayIso,
+  isFridayIso,
   isoToShamsi,
   shamsiToIso,
   toPersianDigits,
@@ -93,6 +96,9 @@ interface MonthlySheetViewProps {
   accruedSummaries: AccruedToTodaySummary[];
   monthLogs: DailyLog[];
   payments: PaymentRecord[];
+  viewMode?: 'card' | 'row';
+  onChangeViewMode?: (mode: 'card' | 'row') => void;
+  onToggleAllDailyFridaysOff?: (enabled: boolean) => void;
   onSaveDailyLog: (payload: {
     worker_id: number;
     work_date: string;
@@ -110,6 +116,7 @@ interface MonthlySheetViewProps {
       manual_absent_days: number;
       manual_overtime_hours: number | null;
       auto_count_days: number;
+      fridays_off?: number;
     }
   ) => void;
   onQuickSettleWorker: (
@@ -128,6 +135,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   workers,
   accruedSummaries,
   payments,
+  viewMode = 'card',
+  onChangeViewMode,
+  onToggleAllDailyFridaysOff,
   onSaveDailyLog,
   onSaveWorkerRangeAndDays,
   onQuickSettleWorker,
@@ -152,6 +162,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   const [manualWorkedDaysInput, setManualWorkedDaysInput] = useState<string>('');
   const [manualAbsentDaysInput, setManualAbsentDaysInput] = useState<string>('0');
   const [manualOvertimeInput, setManualOvertimeInput] = useState<string>('');
+  const [fridaysOffInput, setFridaysOffInput] = useState<boolean>(false);
 
   const [payslipWorkerId, setPayslipWorkerId] = useState<number | null>(null);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState<boolean>(false);
@@ -164,6 +175,12 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   const [settleJy, setSettleJy] = useState<number>(1405);
   const [settleJm, setSettleJm] = useState<number>(7);
   const [settleJd, setSettleJd] = useState<number>(1);
+
+  const dailyWorkers = workers.filter((w) => w.wage_type === 'daily');
+  const allDailyHaveFridaysOff =
+    dailyWorkers.length > 0 && dailyWorkers.every((w) => Boolean(w.fridays_off));
+  const someDailyHaveFridaysOff =
+    dailyWorkers.some((w) => Boolean(w.fridays_off)) && !allDailyHaveFridaysOff;
 
   const openSettleModal = (w: Worker, acc: AccruedToTodaySummary) => {
     const shToday = isoToShamsi(todayIso);
@@ -213,6 +230,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
         ? String(w.manual_overtime_hours)
         : ''
     );
+    setFridaysOffInput(Boolean(w.fridays_off));
     setEditingWorkerId(w.id);
   };
 
@@ -236,8 +254,25 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       manual_overtime_hours:
         manualOvertimeInput.trim() === '' ? null : Math.max(0, Number(manualOvertimeInput)),
       auto_count_days: w.auto_count_days ?? 1,
+      fridays_off: w.wage_type === 'daily' && fridaysOffInput ? 1 : 0,
     });
     setEditingWorkerId(null);
+  };
+
+  // Toggle Friday holiday setting for a single daily-wage worker
+  const handleToggleSingleWorkerFridaysOff = (w: Worker) => {
+    if (w.wage_type !== 'daily') return;
+    const nextFlag = w.fridays_off ? 0 : 1;
+    onSaveWorkerRangeAndDays(w, {
+      start_date: w.start_date,
+      end_date: w.end_date,
+      calc_mode: w.calc_mode || 'to_today',
+      manual_worked_days: null,
+      manual_absent_days: w.manual_absent_days || 0,
+      manual_overtime_hours: w.manual_overtime_hours,
+      auto_count_days: w.auto_count_days ?? 1,
+      fridays_off: nextFlag,
+    });
   };
 
   // Instant 0ms +/- 1 full worked day adjustment
@@ -255,6 +290,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       manual_absent_days: w.manual_absent_days || 0,
       manual_overtime_hours: w.manual_overtime_hours,
       auto_count_days: w.auto_count_days ?? 1,
+      fridays_off: w.fridays_off ?? 0,
     });
   };
 
@@ -267,24 +303,53 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       manual_absent_days: 0,
       manual_overtime_hours: null,
       auto_count_days: 1,
+      fridays_off: w.fridays_off ?? 0,
     });
   };
 
-  // Instant 0ms toggle of a single day inside the continuous calendar (Present 1 day <-> Absent 0 day)
+  // Instant 0ms toggle of a single day inside the continuous calendar
+  // For normal days: default is Present (1) <-> Absent (0)
+  // For Fridays when daily-wage worker has fridays_off=1: default is Holiday/Off (0) <-> Worked Friday (1)
   const handleToggleDayInPeriod = (
     w: Worker,
     isoDate: string,
     existingLog?: DailyLog
   ) => {
+    const isFridayHolidayMode =
+      w.wage_type === 'daily' && Boolean(w.fridays_off) && isFridayIso(isoDate);
+
     let nextStatus: AttendanceStatus = 'absent';
     let nextDays = 0;
 
-    if (!existingLog || existingLog.status === 'present') {
-      nextStatus = 'absent';
-      nextDays = 0;
+    if (isFridayHolidayMode) {
+      if (existingLog?.status === 'present') {
+        nextStatus = 'absent';
+        nextDays = 0;
+      } else {
+        nextStatus = 'present';
+        nextDays = 1;
+      }
     } else {
-      nextStatus = 'present';
-      nextDays = 1;
+      if (!existingLog || existingLog.status === 'present') {
+        nextStatus = 'absent';
+        nextDays = 0;
+      } else {
+        nextStatus = 'present';
+        nextDays = 1;
+      }
+    }
+
+    if (w.manual_worked_days !== null && w.manual_worked_days !== undefined) {
+      onSaveWorkerRangeAndDays(w, {
+        start_date: w.start_date,
+        end_date: w.end_date,
+        calc_mode: w.calc_mode || 'to_today',
+        manual_worked_days: null,
+        manual_absent_days: w.manual_absent_days || 0,
+        manual_overtime_hours: w.manual_overtime_hours,
+        auto_count_days: w.auto_count_days ?? 1,
+        fridays_off: w.fridays_off ?? 0,
+      });
     }
 
     onSaveDailyLog({
@@ -357,6 +422,95 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   const settleModalWorker = workers.find((w) => w.id === settleModalWorkerId);
   const settleModalAccrued = accruedSummaries.find((a) => a.workerId === settleModalWorkerId);
 
+  const renderWorkerCalendarStrip = (
+    worker: Worker,
+    acc: AccruedToTodaySummary,
+    periodDates: ReturnType<typeof getIsoDatesBetween>
+  ) => (
+    <div className="bg-white/95 rounded-xl p-2.5 border border-white/80">
+      <div className="flex flex-wrap items-center justify-between gap-1.5 text-[10px] text-slate-500 mb-2">
+        <span>
+          {worker.wage_type === 'daily' && worker.fridays_off
+            ? 'جمعه‌ها تعطیل (نارنجی = ۰ روز) است؛ اگر کارگر در جمعه‌ای کار کرده روی آن کلیک کنید تا حاضر (سبز = ۱ روز) شود.'
+            : 'لمس هر روز: حاضر (سبز = ۱ روز) یا غایب (قرمز = ۰ روز)'}
+        </span>
+        {worker.wage_type === 'daily' && Boolean(worker.fridays_off) && (
+          <span className="w-fit px-2 py-0.5 rounded-md bg-orange-50 text-orange-800 border border-orange-200 font-bold">
+            تعطیلی جمعه‌ها فعال ({toPersianDigits(acc.fridaysOffCount || 0)} جمعه کسر شد)
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5 max-h-52 overflow-y-auto p-0.5">
+        {periodDates.map((dItem, idx) => {
+          const log = acc.periodLogs.find((l) => l.work_date === dItem.iso);
+          const isFutureDay = dItem.iso > todayIso;
+          const showMonthBadge = idx === 0 || dItem.jd === 1;
+          const isFriday = dItem.weekday === 'جمعه';
+          const isFridayOffActive =
+            isFriday && worker.wage_type === 'daily' && Boolean(worker.fridays_off);
+
+          let cellStyle =
+            'bg-gradient-to-b from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-2xs';
+          let subLabel = dItem.weekday;
+
+          if (isFridayOffActive) {
+            if (log?.status === 'present') {
+              cellStyle =
+                'bg-gradient-to-b from-emerald-500 to-teal-600 text-white border-emerald-600 ring-2 ring-amber-300 shadow-2xs';
+              subLabel = 'جمعه ✓';
+            } else if (log?.status === 'paid_leave') {
+              cellStyle = 'bg-gradient-to-b from-sky-500 to-blue-600 text-white border-sky-600';
+              subLabel = 'مرخصی';
+            } else {
+              cellStyle =
+                'bg-orange-50 text-orange-800 border-dashed border-orange-300 hover:bg-orange-100';
+              subLabel = 'تعطیل';
+            }
+          } else {
+            if (log?.status === 'absent') {
+              cellStyle = 'bg-rose-50 text-rose-600 border-rose-300 line-through';
+            } else if (log?.status === 'paid_leave') {
+              cellStyle = 'bg-gradient-to-b from-sky-500 to-blue-600 text-white border-sky-600';
+            } else if (isFutureDay && acc.calcMode === 'to_today') {
+              cellStyle =
+                'bg-amber-50/90 text-amber-800 border-dashed border-amber-400 hover:bg-amber-100';
+            }
+          }
+
+          return (
+            <React.Fragment key={dItem.iso}>
+              {showMonthBadge && (
+                <span className="w-fit h-10 px-2.5 rounded-lg bg-indigo-50 text-indigo-800 border border-indigo-200 text-[10px] font-bold inline-flex items-center justify-center shrink-0">
+                  {dItem.monthName}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => handleToggleDayInPeriod(worker, dItem.iso, log)}
+                title={
+                  isFridayOffActive
+                    ? log?.status === 'present'
+                      ? `${dItem.weekday} ${toPersianDigits(dItem.jd)} ${dItem.monthName} — کارکرد در جمعه (کلیک برای تبدیل به تعطیل)`
+                      : `${dItem.weekday} ${toPersianDigits(dItem.jd)} ${dItem.monthName} — جمعه تعطیل (کلیک برای ثبت کارکرد در این جمعه)`
+                    : `${dItem.weekday} ${toPersianDigits(dItem.jd)} ${dItem.monthName}`
+                }
+                className={`w-11 h-10 rounded-lg font-mono-num border flex flex-col items-center justify-center gap-0.5 transition-transform active:scale-95 shrink-0 ${cellStyle}`}
+              >
+                <span className="text-[11px] font-extrabold leading-none">
+                  {toPersianDigits(dItem.jd)}
+                </span>
+                <span className="text-[8px] font-normal leading-none opacity-95 whitespace-nowrap">
+                  {subLabel}
+                </span>
+              </button>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-3.5">
       {/* Top Overview Card - Dynamic Project Color & Modern Glass */}
@@ -415,6 +569,66 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
         </div>
       </section>
 
+      {/* Toolbar: Friday Holiday Checkbox (for Daily-Wage Workers) + Card/Row View Switcher */}
+      {workers.length > 0 && (
+        <section className="bg-white border border-emerald-100 rounded-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 shadow-2xs">
+          {/* Selectable Friday Holiday Option */}
+          {dailyWorkers.length > 0 ? (
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={allDailyHaveFridaysOff}
+                ref={(el) => {
+                  if (el) el.indeterminate = someDailyHaveFridaysOff;
+                }}
+                onChange={(e) => onToggleAllDailyFridaysOff?.(e.target.checked)}
+                className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+              />
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-extrabold text-slate-800">
+                  تعطیلی جمعه‌ها (روزمزد)
+                </span>
+                <span className="text-[10px] text-slate-500">
+                  (کسر خودکار جمعه‌ها؛ در صورت کارکرد در جمعه از «تقویم روزها» دستی فعال کنید)
+                </span>
+              </div>
+            </label>
+          ) : (
+            <div className="text-[11px] text-slate-500">
+              نمایش لیست کارگران «{activeProjectName}»
+            </div>
+          )}
+
+          {/* View Mode Toggle: Card Grid vs Horizontal Rows */}
+          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl shrink-0 mr-auto">
+            <button
+              type="button"
+              onClick={() => onChangeViewMode?.('card')}
+              className={`w-fit h-7 px-2.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 transition-all ${
+                viewMode === 'card'
+                  ? 'bg-white text-emerald-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+              <span>کارتی</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeViewMode?.('row')}
+              className={`w-fit h-7 px-2.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 transition-all ${
+                viewMode === 'row'
+                  ? 'bg-white text-emerald-700 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <LayoutList className="w-3.5 h-3.5" />
+              <span>ردیفی</span>
+            </button>
+          </div>
+        </section>
+      )}
+
       {workers.length === 0 ? (
         <div className="bg-white border border-emerald-100 rounded-2xl p-6 text-center space-y-3 shadow-2xs">
           <p className="text-xs sm:text-sm font-bold text-slate-700">
@@ -433,276 +647,441 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
         </div>
       ) : null}
 
-      {/* Worker Cards — Compact 2-Column Grid on Desktop, Neat Single Column on Mobile */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-start">
-        {workers.map((worker, index) => {
-          const acc = accruedSummaries.find((a) => a.workerId === worker.id);
-          if (!acc) return null;
+      {/* Worker List — Supports both 'card' (2-Column Grid) and 'row' (Compact Horizontal Rows) */}
+      {viewMode === 'row' ? (
+        <div className="space-y-1.5">
+          {workers.map((worker, index) => {
+            const acc = accruedSummaries.find((a) => a.workerId === worker.id);
+            if (!acc) return null;
 
-          const theme = WORKER_LIGHT_THEMES[index % WORKER_LIGHT_THEMES.length];
-          const isCalendarOpen = openCalendarWorkerId === worker.id;
+            const theme = WORKER_LIGHT_THEMES[index % WORKER_LIGHT_THEMES.length];
+            const isCalendarOpen = openCalendarWorkerId === worker.id;
+            const periodDates = isCalendarOpen
+              ? getIsoDatesBetween(acc.startDate, acc.endDate || todayIso, 95)
+              : [];
 
-          const periodDates = isCalendarOpen
-            ? getIsoDatesBetween(acc.startDate, acc.endDate || todayIso, 95)
-            : [];
-
-          return (
-            <div
-              key={worker.id}
-              className={`${theme.cardBg} border ${theme.cardBorder} rounded-2xl p-3 sm:p-3.5 space-y-2.5 shadow-2xs transition-all`}
-            >
-              {/* Zone 1: Worker Identity + Compact Net Payable Badge */}
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div
-                    className={`w-9 h-9 rounded-xl ${theme.avatarBg} font-extrabold text-sm flex items-center justify-center shrink-0`}
-                  >
-                    {worker.name.trim().charAt(0)}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <h3 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
+            return (
+              <div
+                key={worker.id}
+                className="bg-white border border-slate-200/90 hover:border-emerald-300 rounded-xl px-3 py-2 shadow-2xs transition-all"
+              >
+                <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">
+                  {/* 1. Identity (Name + Role + Project Dot) */}
+                  <div className="flex items-center gap-2 min-w-0 flex-1 sm:min-w-[170px]">
+                    <div
+                      className={`w-7 h-7 rounded-lg ${theme.avatarBg} font-extrabold text-xs flex items-center justify-center shrink-0`}
+                    >
+                      {worker.name.trim().charAt(0)}
+                    </div>
+                    <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
+                      <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 truncate">
                         {worker.name}
                       </h3>
                       {worker.project_name && (
                         <span
-                          className={`w-fit px-2 py-0.5 rounded-md border text-[9px] font-extrabold inline-flex items-center gap-1 shrink-0 ${
+                          title={`پروژه: ${worker.project_name}`}
+                          className={`w-2 h-2 rounded-full shrink-0 ${
                             getProjectTheme(worker.project_color, (worker.project_id || 1) - 1)
-                              .badgeClass
+                              .dotClass
+                          }`}
+                        />
+                      )}
+                      <span className="text-[10px] text-slate-400 truncate hidden md:inline">
+                        ({worker.role})
+                      </span>
+                      {worker.wage_type === 'daily' && (
+                        <label
+                          title="تعطیل کردن جمعه‌ها برای این کارگر روزمزد"
+                          className={`w-fit px-1.5 py-0.5 rounded-md border text-[9px] font-bold inline-flex items-center gap-1 cursor-pointer select-none shrink-0 transition-colors ${
+                            worker.fridays_off
+                              ? 'bg-orange-50 border-orange-200 text-orange-700'
+                              : 'bg-slate-50 border-slate-200/80 text-slate-400 hover:text-slate-600'
                           }`}
                         >
-                          <span
-                            className={`w-1.5 h-1.5 rounded-full ${
-                              getProjectTheme(worker.project_color, (worker.project_id || 1) - 1)
-                                .dotClass
-                            }`}
+                          <input
+                            type="checkbox"
+                            checked={Boolean(worker.fridays_off)}
+                            onChange={() => handleToggleSingleWorkerFridaysOff(worker)}
+                            className="w-2.5 h-2.5 rounded text-orange-600 focus:ring-0 cursor-pointer"
                           />
-                          <span>{worker.project_name}</span>
+                          <span>جمعه</span>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 2. Compact Worked Days Stepper */}
+                  <div className="flex items-center gap-1 font-mono-num bg-slate-50 border border-slate-200/80 rounded-lg p-0.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleQuickAdjustWorkedDays(worker, acc, -1)}
+                      title="کسر ۱ روز"
+                      className="w-6 h-6 rounded-md hover:bg-rose-100 text-rose-600 flex items-center justify-center transition-colors"
+                    >
+                      <Minus className="w-3 h-3 stroke-[2.5]" />
+                    </button>
+
+                    <span className="text-[11px] font-extrabold text-slate-800 px-1.5 whitespace-nowrap">
+                      {toPersianDigits(acc.effectiveDaysToToday)} روز
+                    </span>
+
+                    {(acc.isDaysManuallyEdited || acc.manualAbsentDays > 0) && (
+                      <button
+                        type="button"
+                        onClick={() => handleResetToAutoCalendar(worker)}
+                        className="p-0.5 rounded text-amber-600 hover:bg-amber-100"
+                        title="بازگشت به محاسبه خودکار تقویم"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => handleQuickAdjustWorkedDays(worker, acc, 1)}
+                      title="افزودن ۱ روز"
+                      className="w-6 h-6 rounded-md hover:bg-emerald-100 text-emerald-600 flex items-center justify-center transition-colors"
+                    >
+                      <Plus className="w-3 h-3 stroke-[2.5]" />
+                    </button>
+                  </div>
+
+                  {/* 3. Minimal Financial Display (Net Payable + Subtle Hints) */}
+                  <div className="flex items-center justify-end gap-2 font-mono-num shrink-0 sm:min-w-[150px]">
+                    {acc.effectiveOvertimeHours > 0 && (
+                      <span
+                        title={`اضافه‌کار: ${formatToman(acc.overtimeEarnedToToday)} تومان`}
+                        className="text-[10px] font-bold text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded hidden lg:inline-block"
+                      >
+                        +{toPersianDigits(acc.effectiveOvertimeHours)}س
+                      </span>
+                    )}
+                    {acc.paidToToday > 0 && (
+                      <span
+                        title={`مساعده دریافتی: ${formatToman(acc.paidToToday)} تومان`}
+                        className="text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded hidden xl:inline-block"
+                      >
+                        مساعده: {formatToman(acc.paidToToday)}
+                      </span>
+                    )}
+                    <div className="text-left">
+                      <span className="text-[10px] text-slate-400 ml-1">مانده:</span>
+                      <span className={`text-xs sm:text-sm font-extrabold ${theme.accentText}`}>
+                        {formatToman(acc.netPayableToToday)}
+                      </span>
+                      <span className="text-[9px] text-slate-400 mr-0.5">ت</span>
+                    </div>
+                  </div>
+
+                  {/* 4. Ultra-Clean Action Bar (Icon Buttons + Settle Pill) */}
+                  <div className="flex items-center justify-end gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenCalendarWorkerId(isCalendarOpen ? null : worker.id)
+                      }
+                      title="تقویم کارکرد و حضور/غیاب"
+                      className={`w-7 h-7 rounded-lg inline-flex items-center justify-center transition-colors ${
+                        isCalendarOpen
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                      }`}
+                    >
+                      <Calendar className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => openRangeAndDaysEditor(worker)}
+                      title={`تنظیم تاریخ (${formatShamsiDayMonth(acc.startDate)} تا ${
+                        acc.endDate ? formatShamsiDayMonth(acc.endDate) : 'امروز'
+                      })`}
+                      className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 inline-flex items-center justify-center transition-colors"
+                    >
+                      <SlidersHorizontal className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setPayslipWorkerId(worker.id)}
+                      title="مشاهده فیش حقوقی"
+                      className="w-7 h-7 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 inline-flex items-center justify-center transition-colors"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-emerald-600" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => openSettleModal(worker, acc)}
+                      className="w-fit h-7 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                    >
+                      <CheckCircle2 className="w-3 h-3 shrink-0" />
+                      <span>تسویه</span>
+                    </button>
+                  </div>
+                </div>
+
+                {isCalendarOpen && (
+                  <div className="mt-2 pt-2 border-t border-slate-100">
+                    {renderWorkerCalendarStrip(worker, acc, periodDates)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-start">
+          {workers.map((worker, index) => {
+            const acc = accruedSummaries.find((a) => a.workerId === worker.id);
+            if (!acc) return null;
+
+            const theme = WORKER_LIGHT_THEMES[index % WORKER_LIGHT_THEMES.length];
+            const isCalendarOpen = openCalendarWorkerId === worker.id;
+
+            const periodDates = isCalendarOpen
+              ? getIsoDatesBetween(acc.startDate, acc.endDate || todayIso, 95)
+              : [];
+
+            return (
+              <div
+                key={worker.id}
+                className={`${theme.cardBg} border ${theme.cardBorder} rounded-2xl p-3 sm:p-3.5 space-y-2.5 shadow-2xs transition-all`}
+              >
+                {/* Zone 1: Worker Identity + Compact Net Payable Badge */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div
+                      className={`w-9 h-9 rounded-xl ${theme.avatarBg} font-extrabold text-sm flex items-center justify-center shrink-0`}
+                    >
+                      {worker.name.trim().charAt(0)}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
+                          {worker.name}
+                        </h3>
+                        {worker.project_name && (
+                          <span
+                            className={`w-fit px-2 py-0.5 rounded-md border text-[9px] font-extrabold inline-flex items-center gap-1 shrink-0 ${
+                              getProjectTheme(worker.project_color, (worker.project_id || 1) - 1)
+                                .badgeClass
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                getProjectTheme(worker.project_color, (worker.project_id || 1) - 1)
+                                  .dotClass
+                              }`}
+                            />
+                            <span>{worker.project_name}</span>
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-600 font-mono-num truncate">
+                        {worker.role} ·{' '}
+                        {worker.wage_type === 'daily'
+                          ? `روزمزد ${formatToman(worker.base_wage)} ت`
+                          : `ماهانه ${formatToman(worker.base_wage)} ت`}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Compact Net Payable Box */}
+                  <div className="w-fit bg-white border border-white rounded-xl px-2.5 py-1 text-left font-mono-num shrink-0 shadow-2xs">
+                    <span className="text-[9px] text-slate-500 block leading-tight">
+                      مانده پرداخت
+                    </span>
+                    <span className={`text-xs sm:text-sm font-extrabold ${theme.accentText}`}>
+                      {formatToman(acc.netPayableToToday)}{' '}
+                      <span className="text-[9px] font-normal text-slate-500">ت</span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Zone 2: Inner White Box — Compact & Non-Stretched */}
+                <div className="bg-white/95 rounded-xl p-2.5 sm:p-3 border border-white space-y-2.5 shadow-2xs">
+                  {/* Sub-row A: Entry/Exit Range + Per-Worker Friday Holiday Toggle + Modal Trigger Button */}
+                  <div className="flex flex-wrap items-center justify-between gap-1.5 pb-2 border-b border-slate-100">
+                    <div className="text-[11px] font-mono-num text-slate-700 leading-snug">
+                      <span className="text-slate-500">بازه: </span>
+                      <strong className="text-slate-900">
+                        {formatShamsiDayMonth(acc.startDate)} تا{' '}
+                        {acc.endDate ? formatShamsiDayMonth(acc.endDate) : 'امروز'}
+                      </strong>
+                      {acc.remainingDaysToWork !== null && acc.remainingDaysToWork > 0 && (
+                        <span className="text-amber-600 font-bold mr-1 text-[10px]">
+                          ({toPersianDigits(acc.remainingDaysToWork)} روز مانده)
                         </span>
                       )}
                     </div>
-                    <div className="text-[11px] text-slate-600 font-mono-num truncate">
-                      {worker.role} ·{' '}
-                      {worker.wage_type === 'daily'
-                        ? `روزمزد ${formatToman(worker.base_wage)} ت`
-                        : `ماهانه ${formatToman(worker.base_wage)} ت`}
-                    </div>
-                  </div>
-                </div>
 
-                {/* Compact Net Payable Box */}
-                <div className="w-fit bg-white border border-white rounded-xl px-2.5 py-1 text-left font-mono-num shrink-0 shadow-2xs">
-                  <span className="text-[9px] text-slate-500 block leading-tight">
-                    مانده پرداخت
-                  </span>
-                  <span className={`text-xs sm:text-sm font-extrabold ${theme.accentText}`}>
-                    {formatToman(acc.netPayableToToday)}{' '}
-                    <span className="text-[9px] font-normal text-slate-500">ت</span>
-                  </span>
-                </div>
-              </div>
-
-              {/* Zone 2: Inner White Box — Compact & Non-Stretched */}
-              <div className="bg-white/95 rounded-xl p-2.5 sm:p-3 border border-white space-y-2.5 shadow-2xs">
-                {/* Sub-row A: Entry/Exit Range + Modal Trigger Button */}
-                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
-                  <div className="text-[11px] font-mono-num text-slate-700 leading-snug">
-                    <span className="text-slate-500">بازه: </span>
-                    <strong className="text-slate-900">
-                      {formatShamsiDayMonth(acc.startDate)} تا{' '}
-                      {acc.endDate ? formatShamsiDayMonth(acc.endDate) : 'امروز'}
-                    </strong>
-                    {acc.remainingDaysToWork !== null && acc.remainingDaysToWork > 0 && (
-                      <span className="text-amber-600 font-bold mr-1 text-[10px]">
-                        ({toPersianDigits(acc.remainingDaysToWork)} روز مانده)
-                      </span>
-                    )}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => openRangeAndDaysEditor(worker)}
-                    className="w-fit h-8 px-2.5 rounded-lg bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition-colors"
-                  >
-                    <SlidersHorizontal className="w-3 h-3" />
-                    <span>تغییر تاریخ</span>
-                  </button>
-                </div>
-
-                {/* Sub-row B: Compact Icon-Only (- / +) Buttons + Fitted Center Pill */}
-                <div className="flex items-center justify-center gap-2.5 font-mono-num">
-                  {/* Subtract 1 Day — Compact Icon Only */}
-                  <button
-                    type="button"
-                    onClick={() => handleQuickAdjustWorkedDays(worker, acc, -1)}
-                    title="کسر ۱ روز"
-                    aria-label="کسر ۱ روز"
-                    className="w-9 h-9 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200/90 active:scale-95 text-rose-600 flex items-center justify-center transition-all shrink-0"
-                  >
-                    <Minus className="w-4 h-4 stroke-[2.5]" />
-                  </button>
-
-                  {/* Center Worked Days Display — Strictly fit to text (w-fit) */}
-                  <div
-                    className={`w-fit px-4 py-1 rounded-xl ${theme.counterBg} flex flex-col items-center justify-center shrink-0`}
-                  >
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs sm:text-sm font-extrabold leading-none whitespace-nowrap">
-                        {toPersianDigits(acc.effectiveDaysToToday)} روز کارکرد
-                      </span>
-                      {(acc.isDaysManuallyEdited || acc.manualAbsentDays > 0) && (
-                        <button
-                          type="button"
-                          onClick={() => handleResetToAutoCalendar(worker)}
-                          className="p-0.5 rounded bg-white/20 hover:bg-white/30 text-white transition-colors"
-                          title="بازگشت به محاسبه خودکار تقویم"
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {worker.wage_type === 'daily' && (
+                        <label
+                          title="با تیک زدن، جمعه‌های این کارگر روزمزد تعطیل (۰ روز) محاسبه می‌شود و از تقویم روزها قابل تغییر دستی است"
+                          className={`w-fit h-7 px-2 rounded-lg border text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer select-none transition-colors ${
+                            worker.fridays_off
+                              ? 'bg-orange-50 border-orange-200 text-orange-800'
+                              : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                          }`}
                         >
-                          <RotateCcw className="w-2.5 h-2.5" />
-                        </button>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(worker.fridays_off)}
+                            onChange={() => handleToggleSingleWorkerFridaysOff(worker)}
+                            className="w-3 h-3 rounded text-orange-600 focus:ring-0 cursor-pointer"
+                          />
+                          <span>
+                            جمعه تعطیل
+                            {worker.fridays_off && (acc.fridaysOffCount || 0) > 0
+                              ? ` (${toPersianDigits(acc.fridaysOffCount)})`
+                              : ''}
+                          </span>
+                        </label>
                       )}
+
+                      <button
+                        type="button"
+                        onClick={() => openRangeAndDaysEditor(worker)}
+                        className="w-fit h-7 px-2.5 rounded-lg bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition-colors"
+                      >
+                        <SlidersHorizontal className="w-3 h-3" />
+                        <span>تغییر تاریخ</span>
+                      </button>
                     </div>
-                    <span className="w-fit mt-1 px-1.5 py-0.5 rounded bg-black/15 text-[9px] font-medium text-white/95 leading-none whitespace-nowrap">
-                      {acc.isDaysManuallyEdited ? 'ویرایش دستی' : 'محاسبه تا امروز'}
-                    </span>
                   </div>
 
-                  {/* Add 1 Day — Compact Icon Only */}
-                  <button
-                    type="button"
-                    onClick={() => handleQuickAdjustWorkedDays(worker, acc, 1)}
-                    title="افزودن ۱ روز"
-                    aria-label="افزودن ۱ روز"
-                    className="w-9 h-9 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/90 active:scale-95 text-emerald-600 flex items-center justify-center transition-all shrink-0"
-                  >
-                    <Plus className="w-4 h-4 stroke-[2.5]" />
-                  </button>
-                </div>
+                  {/* Sub-row B: Compact Icon-Only (- / +) Buttons + Fitted Center Pill */}
+                  <div className="flex items-center justify-center gap-2.5 font-mono-num">
+                    {/* Subtract 1 Day — Compact Icon Only */}
+                    <button
+                      type="button"
+                      onClick={() => handleQuickAdjustWorkedDays(worker, acc, -1)}
+                      title="کسر ۱ روز"
+                      aria-label="کسر ۱ روز"
+                      className="w-9 h-9 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200/90 active:scale-95 text-rose-600 flex items-center justify-center transition-all shrink-0"
+                    >
+                      <Minus className="w-4 h-4 stroke-[2.5]" />
+                    </button>
 
-                {/* Sub-row C: Compact Financial Breakdown */}
-                <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-100 text-center font-mono-num">
-                  <div className="bg-slate-50/90 border border-slate-100 rounded-lg py-1.5 px-1">
-                    <span className="text-[9px] text-slate-500 block">دستمزد پایه</span>
-                    <span className="text-[11px] font-extrabold text-slate-800 mt-0.5 block truncate">
-                      {formatToman(acc.baseEarnedToToday)} ت
-                    </span>
-                  </div>
-
-                  <div className="bg-sky-50/70 border border-sky-100 rounded-lg py-1.5 px-1">
-                    <span className="text-[9px] text-sky-700 block">
-                      اضافه‌کاری ({toPersianDigits(acc.effectiveOvertimeHours)} س)
-                    </span>
-                    <span className="text-[11px] font-extrabold text-sky-800 mt-0.5 block truncate">
-                      {formatToman(acc.overtimeEarnedToToday + acc.bonusToToday)} ت
-                    </span>
-                  </div>
-
-                  <div className="bg-amber-50/80 border border-amber-100 rounded-lg py-1.5 px-1">
-                    <span className="text-[9px] text-amber-800 block">مساعده</span>
-                    <span className="text-[11px] font-extrabold text-amber-700 mt-0.5 block truncate">
-                      {formatToman(acc.paidToToday)} ت
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Zone 3: Compact Non-Stretched Action Buttons (w-fit) */}
-              <div className="flex flex-wrap items-center justify-between gap-1.5">
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setOpenCalendarWorkerId(isCalendarOpen ? null : worker.id)
-                    }
-                    className={`w-fit h-8 px-2.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
-                      isCalendarOpen
-                        ? 'bg-emerald-600 text-white shadow-2xs'
-                        : 'bg-white/90 hover:bg-white text-slate-700 border border-white shadow-2xs'
-                    }`}
-                  >
-                    <Calendar className="w-3 h-3 shrink-0" />
-                    <span>{isCalendarOpen ? 'بستن تقویم' : 'تقویم روزها'}</span>
-                    {isCalendarOpen ? (
-                      <ChevronUp className="w-3 h-3 shrink-0" />
-                    ) : (
-                      <ChevronDown className="w-3 h-3 shrink-0" />
-                    )}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setPayslipWorkerId(worker.id)}
-                    className="w-fit h-8 px-2.5 rounded-lg bg-white/90 hover:bg-white text-slate-700 border border-white text-[11px] font-bold inline-flex items-center gap-1 transition-colors whitespace-nowrap shadow-2xs"
-                  >
-                    <FileText className="w-3 h-3 text-emerald-600 shrink-0" />
-                    <span>فیش کارکرد</span>
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => openSettleModal(worker, acc)}
-                  className="w-fit h-8 px-3 rounded-lg bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 active:scale-95 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap shadow-2xs"
-                >
-                  <CheckCircle2 className="w-3 h-3 shrink-0" />
-                  <span>تسویه مانده</span>
-                </button>
-              </div>
-
-              {/* Collapsible Interactive Calendar Strip — Compact Fixed-Size Squares (Not Stretched) */}
-              {isCalendarOpen && (
-                <div className="bg-white/95 rounded-xl p-2.5 border border-white/80">
-                  <div className="text-[10px] text-slate-500 mb-2">
-                    لمس هر روز: حاضر (سبز = ۱ روز) یا غایب (قرمز = ۰ روز)
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-1.5 max-h-52 overflow-y-auto p-0.5">
-                    {periodDates.map((dItem, idx) => {
-                      const log = acc.periodLogs.find((l) => l.work_date === dItem.iso);
-                      const isFutureDay = dItem.iso > todayIso;
-                      const showMonthBadge = idx === 0 || dItem.jd === 1;
-
-                      let cellStyle =
-                        'bg-gradient-to-b from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-2xs';
-                      if (log?.status === 'absent') {
-                        cellStyle = 'bg-rose-50 text-rose-600 border-rose-300 line-through';
-                      } else if (log?.status === 'paid_leave') {
-                        cellStyle =
-                          'bg-gradient-to-b from-sky-500 to-blue-600 text-white border-sky-600';
-                      } else if (isFutureDay && acc.calcMode === 'to_today') {
-                        cellStyle =
-                          'bg-amber-50/90 text-amber-800 border-dashed border-amber-400 hover:bg-amber-100';
-                      }
-
-                      return (
-                        <React.Fragment key={dItem.iso}>
-                          {showMonthBadge && (
-                            <span className="w-fit h-10 px-2.5 rounded-lg bg-indigo-50 text-indigo-800 border border-indigo-200 text-[10px] font-bold inline-flex items-center justify-center shrink-0">
-                              {dItem.monthName}
-                            </span>
-                          )}
+                    {/* Center Worked Days Display — Strictly fit to text (w-fit) */}
+                    <div
+                      className={`w-fit px-4 py-1 rounded-xl ${theme.counterBg} flex flex-col items-center justify-center shrink-0`}
+                    >
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs sm:text-sm font-extrabold leading-none whitespace-nowrap">
+                          {toPersianDigits(acc.effectiveDaysToToday)} روز کارکرد
+                        </span>
+                        {(acc.isDaysManuallyEdited || acc.manualAbsentDays > 0) && (
                           <button
                             type="button"
-                            onClick={() => handleToggleDayInPeriod(worker, dItem.iso, log)}
-                            title={`${dItem.weekday} ${toPersianDigits(dItem.jd)} ${dItem.monthName}`}
-                            className={`w-11 h-10 rounded-lg font-mono-num border flex flex-col items-center justify-center gap-0.5 transition-transform active:scale-95 shrink-0 ${cellStyle}`}
+                            onClick={() => handleResetToAutoCalendar(worker)}
+                            className="p-0.5 rounded bg-white/20 hover:bg-white/30 text-white transition-colors"
+                            title="بازگشت به محاسبه خودکار تقویم"
                           >
-                            <span className="text-[11px] font-extrabold leading-none">
-                              {toPersianDigits(dItem.jd)}
-                            </span>
-                            <span className="text-[8px] font-normal leading-none opacity-90 whitespace-nowrap">
-                              {dItem.weekday}
-                            </span>
+                            <RotateCcw className="w-2.5 h-2.5" />
                           </button>
-                        </React.Fragment>
-                      );
-                    })}
+                        )}
+                      </div>
+                      <span className="w-fit mt-1 px-1.5 py-0.5 rounded bg-black/15 text-[9px] font-medium text-white/95 leading-none whitespace-nowrap">
+                        {acc.isDaysManuallyEdited
+                          ? 'ویرایش دستی'
+                          : worker.wage_type === 'daily' && worker.fridays_off
+                          ? `بدون جمعه‌ها (${toPersianDigits(acc.fridaysOffCount || 0)} جمعه کسر شد)`
+                          : 'محاسبه تا امروز'}
+                      </span>
+                    </div>
+
+                    {/* Add 1 Day — Compact Icon Only */}
+                    <button
+                      type="button"
+                      onClick={() => handleQuickAdjustWorkedDays(worker, acc, 1)}
+                      title="افزودن ۱ روز"
+                      aria-label="افزودن ۱ روز"
+                      className="w-9 h-9 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200/90 active:scale-95 text-emerald-600 flex items-center justify-center transition-all shrink-0"
+                    >
+                      <Plus className="w-4 h-4 stroke-[2.5]" />
+                    </button>
+                  </div>
+
+                  {/* Sub-row C: Compact Financial Breakdown */}
+                  <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-100 text-center font-mono-num">
+                    <div className="bg-slate-50/90 border border-slate-100 rounded-lg py-1.5 px-1">
+                      <span className="text-[9px] text-slate-500 block">دستمزد پایه</span>
+                      <span className="text-[11px] font-extrabold text-slate-800 mt-0.5 block truncate">
+                        {formatToman(acc.baseEarnedToToday)} ت
+                      </span>
+                    </div>
+
+                    <div className="bg-sky-50/70 border border-sky-100 rounded-lg py-1.5 px-1">
+                      <span className="text-[9px] text-sky-700 block">
+                        اضافه‌کاری ({toPersianDigits(acc.effectiveOvertimeHours)} س)
+                      </span>
+                      <span className="text-[11px] font-extrabold text-sky-800 mt-0.5 block truncate">
+                        {formatToman(acc.overtimeEarnedToToday + acc.bonusToToday)} ت
+                      </span>
+                    </div>
+
+                    <div className="bg-amber-50/80 border border-amber-100 rounded-lg py-1.5 px-1">
+                      <span className="text-[9px] text-amber-800 block">مساعده</span>
+                      <span className="text-[11px] font-extrabold text-amber-700 mt-0.5 block truncate">
+                        {formatToman(acc.paidToToday)} ت
+                      </span>
+                    </div>
                   </div>
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+
+                {/* Zone 3: Compact Non-Stretched Action Buttons (w-fit) */}
+                <div className="flex flex-wrap items-center justify-between gap-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenCalendarWorkerId(isCalendarOpen ? null : worker.id)
+                      }
+                      className={`w-fit h-8 px-2.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap ${
+                        isCalendarOpen
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : 'bg-white/90 hover:bg-white text-slate-700 border border-white shadow-2xs'
+                      }`}
+                    >
+                      <Calendar className="w-3 h-3 shrink-0" />
+                      <span>{isCalendarOpen ? 'بستن تقویم' : 'تقویم روزها'}</span>
+                      {isCalendarOpen ? (
+                        <ChevronUp className="w-3 h-3 shrink-0" />
+                      ) : (
+                        <ChevronDown className="w-3 h-3 shrink-0" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setPayslipWorkerId(worker.id)}
+                      className="w-fit h-8 px-2.5 rounded-lg bg-white/90 hover:bg-white text-slate-700 border border-white text-[11px] font-bold inline-flex items-center gap-1 transition-colors whitespace-nowrap shadow-2xs"
+                    >
+                      <FileText className="w-3 h-3 text-emerald-600 shrink-0" />
+                      <span>فیش کارکرد</span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => openSettleModal(worker, acc)}
+                    className="w-fit h-8 px-3 rounded-lg bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 active:scale-95 text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all whitespace-nowrap shadow-2xs"
+                  >
+                    <CheckCircle2 className="w-3 h-3 shrink-0" />
+                    <span>تسویه مانده</span>
+                  </button>
+                </div>
+
+                {/* Collapsible Interactive Calendar Strip */}
+                {isCalendarOpen && renderWorkerCalendarStrip(worker, acc, periodDates)}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Separate Modal Window for Changing Entry/Exit Date & Worked Days */}
       {editingWorker && editingWorkerAccrued && (
@@ -841,7 +1220,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 )}
               </div>
 
-              {/* Direct Overrides */}
+              {/* Direct Overrides & Friday Holiday Option */}
               <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2.5">
                 <div>
                   <label className="block text-[11px] text-slate-600 mb-1">
@@ -856,6 +1235,23 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     <option value="full_range">کل بازه ورود تا خروج</option>
                   </select>
                 </div>
+
+                {editingWorker.wage_type === 'daily' && (
+                  <label className="flex items-center gap-2 p-2.5 rounded-lg bg-orange-50/80 border border-orange-200/80 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={fridaysOffInput}
+                      onChange={(e) => setFridaysOffInput(e.target.checked)}
+                      className="w-4 h-4 rounded text-orange-600 focus:ring-0 cursor-pointer"
+                    />
+                    <div className="text-[11px] text-orange-950">
+                      <span className="font-bold block">تعطیل بودن جمعه‌ها (ویژه روزمزد)</span>
+                      <span className="text-[10px] text-orange-800">
+                        جمعه‌ها خودکار کسر می‌شوند؛ در صورت کارکرد در جمعه از تقویم دستی فعال کنید.
+                      </span>
+                    </div>
+                  </label>
+                )}
 
                 <div className="grid grid-cols-2 gap-2.5">
                   <div>

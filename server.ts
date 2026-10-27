@@ -183,6 +183,9 @@ function migrateColumns() {
   if (!colNames.has('manual_overtime_hours')) {
     db.exec(`ALTER TABLE workers ADD COLUMN manual_overtime_hours REAL DEFAULT NULL;`);
   }
+  if (!colNames.has('fridays_off')) {
+    db.exec(`ALTER TABLE workers ADD COLUMN fridays_off INTEGER NOT NULL DEFAULT 0;`);
+  }
 
   // Ensure projects table has color column (non-destructive schema migration only)
   const projCols = db.prepare('PRAGMA table_info(projects)').all() as Array<{ name: string }>;
@@ -225,6 +228,39 @@ function addDaysToIso(iso: string, days: number): string {
   const dt = new Date(y, m - 1, d);
   dt.setDate(dt.getDate() + days);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+}
+
+function isFridayIso(isoDate: string): boolean {
+  const [y, m, d] = (isoDate || '').split('-').map(Number);
+  if (!y || !m || !d) return false;
+  return new Date(y, m - 1, d).getDay() === 5;
+}
+
+function countUnloggedFridaysBetween(
+  startIso: string,
+  endIso: string,
+  loggedDatesSet: Set<string>
+): number {
+  if (!startIso || !endIso || startIso > endIso) return 0;
+  const [y1, m1, d1] = startIso.split('-').map(Number);
+  const [y2, m2, d2] = endIso.split('-').map(Number);
+  const cur = new Date(y1, m1 - 1, d1);
+  const end = new Date(y2, m2 - 1, d2);
+  let fridays = 0;
+  let guard = 0;
+  while (cur <= end && guard < 1500) {
+    if (cur.getDay() === 5) {
+      const iso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(
+        cur.getDate()
+      ).padStart(2, '0')}`;
+      if (!loggedDatesSet.has(iso)) {
+        fridays++;
+      }
+    }
+    cur.setDate(cur.getDate() + 1);
+    guard++;
+  }
+  return fridays;
 }
 
 function seedIfEmpty() {
@@ -901,6 +937,19 @@ async function startServer() {
             l.work_date >= startDate &&
             l.work_date <= targetEndIso
         );
+        const loggedDatesSet = new Set(logsInCalcWindow.map((l) => l.work_date));
+        const isFridaysOffEnabled = w.wage_type === 'daily' && Boolean(w.fridays_off);
+
+        const unloggedFridays =
+          !notStartedYet && isFridaysOffEnabled
+            ? countUnloggedFridaysBetween(startDate, targetEndIso, loggedDatesSet)
+            : 0;
+        const explicitAbsentFridays =
+          !notStartedYet && isFridaysOffEnabled
+            ? logsInCalcWindow.filter((l) => isFridayIso(l.work_date) && l.status === 'absent')
+                .length
+            : 0;
+        const fridaysOffCount = unloggedFridays + explicitAbsentFridays;
 
         const calendarAbsentDays = logsInCalcWindow.filter((l) => l.status === 'absent').length;
         const halfDaysCount = logsInCalcWindow.filter((l) => l.status === 'half').length;
@@ -915,7 +964,10 @@ async function startServer() {
               (s, l) => s + Number(l.days_equiv || 0),
               0
             );
-            const unloggedDays = Math.max(0, activeWindowDays - loggedDatesCount);
+            const unloggedDays = Math.max(
+              0,
+              activeWindowDays - loggedDatesCount - unloggedFridays
+            );
             rawCalculatedDays = Math.max(0, unloggedDays + loggedDaysSum - manualAbsentDays);
           } else {
             rawCalculatedDays = Math.max(
@@ -989,6 +1041,7 @@ async function startServer() {
           calendarAbsentDays,
           manualAbsentDays,
           totalAbsentDays,
+          fridaysOffCount,
           halfDaysCount,
           rawCalculatedDays,
           effectiveDaysToToday,
@@ -1029,12 +1082,20 @@ async function startServer() {
         const logsInActiveRange = wLogs.filter(
           (l) => l.work_date >= activeRangeStart && l.work_date <= activeRangeEnd
         );
+        const isFridaysOffEnabled = w.wage_type === 'daily' && Boolean(w.fridays_off);
 
         let loggedDays = 0;
         if (w.auto_count_days !== 0 && activeRangeStart <= activeRangeEnd) {
           const elapsedInMonth = Math.max(0, diffDaysInclusive(activeRangeStart, activeRangeEnd));
+          const loggedDatesSet = new Set(logsInActiveRange.map((l) => l.work_date));
+          const unloggedFridays = isFridaysOffEnabled
+            ? countUnloggedFridaysBetween(activeRangeStart, activeRangeEnd, loggedDatesSet)
+            : 0;
           const sumLogged = logsInActiveRange.reduce((s, l) => s + Number(l.days_equiv || 0), 0);
-          const unloggedCount = Math.max(0, elapsedInMonth - logsInActiveRange.length);
+          const unloggedCount = Math.max(
+            0,
+            elapsedInMonth - logsInActiveRange.length - unloggedFridays
+          );
           loggedDays = unloggedCount + sumLogged;
         } else {
           loggedDays = wLogs.reduce((sum, l) => sum + Number(l.days_equiv || 0), 0);
@@ -1215,6 +1276,7 @@ async function startServer() {
         manual_absent_days,
         manual_overtime_hours,
         auto_count_days,
+        fridays_off,
         notes,
       } = req.body;
       if (!name || !String(name).trim()) {
@@ -1224,9 +1286,9 @@ async function startServer() {
         INSERT INTO workers (
           project_id, name, role, phone, wage_type, base_wage, overtime_rate,
           start_date, end_date, calc_mode, manual_worked_days, manual_absent_days, manual_overtime_hours,
-          auto_count_days, active, notes
+          auto_count_days, fridays_off, active, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
       `);
       const info = stmt.run(
         Number(project_id) || 1,
@@ -1247,6 +1309,7 @@ async function startServer() {
           ? null
           : Number(manual_overtime_hours),
         auto_count_days === undefined ? 1 : Number(Boolean(auto_count_days)),
+        fridays_off === undefined ? 0 : Number(Boolean(fridays_off)),
         String(notes || '').trim()
       );
       res.json({ id: info.lastInsertRowid });
@@ -1277,6 +1340,7 @@ async function startServer() {
         manual_absent_days = existing.manual_absent_days,
         manual_overtime_hours = existing.manual_overtime_hours,
         auto_count_days = existing.auto_count_days,
+        fridays_off = existing.fridays_off,
         active = existing.active,
         notes = existing.notes,
       } = req.body;
@@ -1288,7 +1352,7 @@ async function startServer() {
         SET project_id = ?, name = ?, role = ?, phone = ?, wage_type = ?, base_wage = ?, overtime_rate = ?,
             start_date = ?, end_date = ?, calc_mode = ?,
             manual_worked_days = ?, manual_absent_days = ?, manual_overtime_hours = ?,
-            auto_count_days = ?, active = ?, notes = ?
+            auto_count_days = ?, fridays_off = ?, active = ?, notes = ?
         WHERE id = ?
       `).run(
         resolvedProjectId,
@@ -1309,6 +1373,7 @@ async function startServer() {
           ? null
           : Number(manual_overtime_hours),
         auto_count_days === undefined ? 1 : Number(Boolean(auto_count_days)),
+        fridays_off === undefined ? Number(Boolean(existing.fridays_off)) : Number(Boolean(fridays_off)),
         active === undefined ? 1 : Number(Boolean(active)),
         String(notes || '').trim(),
         id
