@@ -184,6 +184,23 @@ export function getShamsiMonthLength(jy: number, jm: number): number {
   return isLeap ? 30 : 29;
 }
 
+export function getShamsiYearOptions(
+  centerYear?: number,
+  extraYears: Array<number | null | undefined> = []
+): number[] {
+  const base = centerYear || isoToShamsi(getTodayIso()).jy;
+  const set = new Set<number>();
+  for (let y = base - 3; y <= base + 3; y++) {
+    set.add(y);
+  }
+  for (const y of extraYears) {
+    if (typeof y === 'number' && !isNaN(y) && y > 1300 && y < 1600) {
+      set.add(y);
+    }
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
 export function isFridayIso(isoDate: string): boolean {
   const [y, m, d] = (isoDate || '').split('-').map(Number);
   if (!y || !m || !d) return false;

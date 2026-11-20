@@ -14,4 +14,7 @@ services:
       - TZ=Asia/Tehran
       - DATA_DIR=/app/data
       - LEGACY_DATA_DIR=/app/legacy_data
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - TRUST_PROXY=${TRUST_PROXY:-false}
 

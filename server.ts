@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express from 'express';
 import crypto from 'node:crypto';
 import fs from 'fs';
@@ -104,6 +105,7 @@ db.exec(`
     manual_absent_days REAL NOT NULL DEFAULT 0,
     manual_overtime_hours REAL DEFAULT NULL,
     auto_count_days INTEGER NOT NULL DEFAULT 1,
+    fridays_off INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     notes TEXT DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -213,54 +215,11 @@ function migrateColumns() {
 
 migrateColumns();
 
-function diffDaysInclusive(startIso: string, endIso: string): number {
-  if (!startIso || !endIso || startIso > endIso) return 0;
-  const [y1, m1, d1] = startIso.split('-').map(Number);
-  const [y2, m2, d2] = endIso.split('-').map(Number);
-  const utc1 = Date.UTC(y1, m1 - 1, d1);
-  const utc2 = Date.UTC(y2, m2 - 1, d2);
-  const diff = Math.floor((utc2 - utc1) / (1000 * 60 * 60 * 24));
-  return diff + 1;
-}
-
 function addDaysToIso(iso: string, days: number): string {
   const [y, m, d] = iso.split('-').map(Number);
   const dt = new Date(y, m - 1, d);
   dt.setDate(dt.getDate() + days);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-}
-
-function isFridayIso(isoDate: string): boolean {
-  const [y, m, d] = (isoDate || '').split('-').map(Number);
-  if (!y || !m || !d) return false;
-  return new Date(y, m - 1, d).getDay() === 5;
-}
-
-function countUnloggedFridaysBetween(
-  startIso: string,
-  endIso: string,
-  loggedDatesSet: Set<string>
-): number {
-  if (!startIso || !endIso || startIso > endIso) return 0;
-  const [y1, m1, d1] = startIso.split('-').map(Number);
-  const [y2, m2, d2] = endIso.split('-').map(Number);
-  const cur = new Date(y1, m1 - 1, d1);
-  const end = new Date(y2, m2 - 1, d2);
-  let fridays = 0;
-  let guard = 0;
-  while (cur <= end && guard < 1500) {
-    if (cur.getDay() === 5) {
-      const iso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(
-        cur.getDate()
-      ).padStart(2, '0')}`;
-      if (!loggedDatesSet.has(iso)) {
-        fridays++;
-      }
-    }
-    cur.setDate(cur.getDate() + 1);
-    guard++;
-  }
-  return fridays;
 }
 
 function seedIfEmpty() {
@@ -516,9 +475,6 @@ function extractTokenFromReq(req: express.Request): string | null {
   if (cookies[SESSION_COOKIE_NAME]) {
     return cookies[SESSION_COOKIE_NAME];
   }
-  if (typeof req.query.token === 'string' && req.query.token.trim()) {
-    return req.query.token.trim();
-  }
   return null;
 }
 
@@ -539,17 +495,28 @@ function validateSessionFromReq(req: express.Request): { valid: boolean; usernam
   return { valid: true, username: row.username, tokenHash };
 }
 
-function setSessionCookie(res: express.Response, rawToken: string, maxAgeSec: number) {
+function isSecureRequest(req: express.Request): boolean {
+  if (req.secure) return true;
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  if (typeof forwardedProto === 'string') {
+    return forwardedProto.split(',')[0].trim().toLowerCase() === 'https';
+  }
+  return false;
+}
+
+function setSessionCookie(req: express.Request, res: express.Response, rawToken: string, maxAgeSec: number) {
+  const secureFlag = isSecureRequest(req) ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; Path=/; Max-Age=${maxAgeSec}; SameSite=Lax`
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(rawToken)}; HttpOnly; Path=/; Max-Age=${maxAgeSec}; SameSite=Lax${secureFlag}`
   );
 }
 
-function clearSessionCookie(res: express.Response) {
+function clearSessionCookie(req: express.Request, res: express.Response) {
+  const secureFlag = isSecureRequest(req) ? '; Secure' : '';
   res.setHeader(
     'Set-Cookie',
-    `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax`
+    `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax${secureFlag}`
   );
 }
 
@@ -562,17 +529,32 @@ interface RateLimitRecord {
 const loginRateLimits = new Map<string, RateLimitRecord>();
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+
+function sweepExpiredRateLimits(now: number) {
+  if (loginRateLimits.size < 100) return;
+  for (const [key, rec] of loginRateLimits.entries()) {
+    const expiredLock = rec.lockedUntil > 0 && rec.lockedUntil <= now;
+    const expiredWindow = rec.lockedUntil === 0 && now - rec.firstFailureAt > LOCKOUT_WINDOW_MS;
+    if (expiredLock || expiredWindow) {
+      loginRateLimits.delete(key);
+    }
+  }
+}
 
 function getClientIp(req: express.Request): string {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.trim()) {
-    return xff.split(',')[0].trim();
+  if (TRUST_PROXY) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.trim()) {
+      return xff.split(',')[0].trim();
+    }
   }
-  return req.ip || req.socket.remoteAddress || 'unknown';
+  return req.socket.remoteAddress || req.ip || 'unknown';
 }
 
 function checkRateLimit(ip: string): { allowed: boolean; remainingSeconds: number } {
   const now = Date.now();
+  sweepExpiredRateLimits(now);
   const rec = loginRateLimits.get(ip);
   if (!rec) return { allowed: true, remainingSeconds: 0 };
   if (rec.lockedUntil > now) {
@@ -581,7 +563,7 @@ function checkRateLimit(ip: string): { allowed: boolean; remainingSeconds: numbe
       remainingSeconds: Math.ceil((rec.lockedUntil - now) / 1000),
     };
   }
-  if (now - rec.firstFailureAt > LOCKOUT_WINDOW_MS) {
+  if (now - rec.firstFailureAt > LOCKOUT_WINDOW_MS || (rec.lockedUntil > 0 && rec.lockedUntil <= now)) {
     loginRateLimits.delete(ip);
   }
   return { allowed: true, remainingSeconds: 0 };
@@ -589,6 +571,7 @@ function checkRateLimit(ip: string): { allowed: boolean; remainingSeconds: numbe
 
 function recordFailedAttempt(ip: string): { locked: boolean; attemptsLeft: number; remainingSeconds: number } {
   const now = Date.now();
+  sweepExpiredRateLimits(now);
   const existing = loginRateLimits.get(ip);
   if (!existing || now - existing.firstFailureAt > LOCKOUT_WINDOW_MS) {
     loginRateLimits.set(ip, {
@@ -671,7 +654,7 @@ async function startServer() {
 
       setAdminCredentials(cleanUser, rawPass);
       const { rawToken, maxAgeSec } = createAuthSession(cleanUser, Boolean(rememberMe));
-      setSessionCookie(res, rawToken, maxAgeSec);
+      setSessionCookie(req, res, rawToken, maxAgeSec);
 
       res.json({
         ok: true,
@@ -725,7 +708,7 @@ async function startServer() {
 
       clearRateLimit(ip);
       const { rawToken, maxAgeSec } = createAuthSession(creds.username, Boolean(rememberMe));
-      setSessionCookie(res, rawToken, maxAgeSec);
+      setSessionCookie(req, res, rawToken, maxAgeSec);
 
       res.json({
         ok: true,
@@ -744,7 +727,7 @@ async function startServer() {
       if (session.tokenHash) {
         db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(session.tokenHash);
       }
-      clearSessionCookie(res);
+      clearSessionCookie(req, res);
       res.json({ ok: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -819,7 +802,7 @@ async function startServer() {
       // Invalidate all previous sessions and issue a fresh token
       db.prepare('DELETE FROM auth_sessions').run();
       const { rawToken, maxAgeSec } = createAuthSession(cleanNewUser, true);
-      setSessionCookie(res, rawToken, maxAgeSec);
+      setSessionCookie(req, res, rawToken, maxAgeSec);
 
       res.json({
         ok: true,
@@ -831,14 +814,9 @@ async function startServer() {
     }
   });
 
-  app.get('/api/bootstrap', (req, res) => {
+  app.get('/api/bootstrap', (_req, res) => {
     try {
       const todayIso = getTodayIso();
-      const todayShamsi = isoToShamsi(todayIso);
-
-      const workDate = (req.query.workDate as string) || todayIso;
-      const shamsiYear = Number(req.query.shamsiYear) || todayShamsi.jy;
-      const shamsiMonth = Number(req.query.shamsiMonth) || todayShamsi.jm;
 
       const projects = db.prepare('SELECT * FROM projects ORDER BY active DESC, id ASC').all() as Array<any>;
 
@@ -849,21 +827,9 @@ async function startServer() {
         ORDER BY w.active DESC, w.id ASC
       `).all() as Array<any>;
 
-      const dailyLogs = db
-        .prepare('SELECT * FROM daily_logs WHERE work_date = ?')
-        .all(workDate) as Array<any>;
-
       const allLogs = db
         .prepare('SELECT * FROM daily_logs ORDER BY work_date ASC')
         .all() as Array<any>;
-
-      const monthLogs = db
-        .prepare('SELECT * FROM daily_logs WHERE shamsi_year = ? AND shamsi_month = ? ORDER BY work_date DESC')
-        .all(shamsiYear, shamsiMonth) as Array<any>;
-
-      const monthlyRecords = db
-        .prepare('SELECT * FROM monthly_records WHERE shamsi_year = ? AND shamsi_month = ?')
-        .all(shamsiYear, shamsiMonth) as Array<any>;
 
       const allPayments = db
         .prepare(`
@@ -874,313 +840,11 @@ async function startServer() {
         `)
         .all() as Array<any>;
 
-      const payments = allPayments.filter(
-        (p) => p.shamsi_year === shamsiYear && p.shamsi_month === shamsiMonth
-      );
-
-      // 1. Calculate Period / Accrued Summary for each worker
-      const accruedSummaries = workers.map((w) => {
-        const startDate: string = w.start_date || shamsiToIso(todayShamsi.jy, todayShamsi.jm, 1);
-        const endDate: string | null = w.end_date || null;
-        const calcMode: 'to_today' | 'full_range' | 'manual' = w.calc_mode || 'to_today';
-        const autoCount = w.auto_count_days !== 0;
-
-        // If calc_mode === 'full_range' and endDate is set, calculate up to endDate; otherwise calculate up to min(todayIso, endDate)
-        const targetEndIso =
-          calcMode === 'full_range' && endDate
-            ? endDate
-            : endDate && endDate < todayIso
-            ? endDate
-            : todayIso;
-
-        const notStartedYet = startDate > targetEndIso;
-        const isPeriodFinished = Boolean(endDate && endDate < todayIso);
-
-        const calendarDaysElapsedToToday =
-          startDate > todayIso
-            ? 0
-            : Math.max(
-                0,
-                diffDaysInclusive(startDate, endDate && endDate < todayIso ? endDate : todayIso)
-              );
-
-        const activeWindowDays = notStartedYet
-          ? 0
-          : Math.max(0, diffDaysInclusive(startDate, targetEndIso));
-
-        const totalPeriodDays = endDate
-          ? Math.max(1, diffDaysInclusive(startDate, endDate))
-          : null;
-
-        let remainingDaysToWork: number | null = null;
-        if (endDate) {
-          if (endDate <= todayIso) {
-            remainingDaysToWork = 0;
-          } else {
-            const firstFutureDay = startDate > todayIso ? startDate : addDaysToIso(todayIso, 1);
-            remainingDaysToWork = Math.max(0, diffDaysInclusive(firstFutureDay, endDate));
-          }
-        }
-
-        // All logs in the worker's overall [startDate, endDate || todayIso]
-        const periodLogs = allLogs.filter(
-          (l) =>
-            l.worker_id === w.id &&
-            l.work_date >= startDate &&
-            (!endDate || l.work_date <= endDate)
-        );
-
-        // Logs inside the active calculation window [startDate, targetEndIso]
-        const logsInCalcWindow = allLogs.filter(
-          (l) =>
-            l.worker_id === w.id &&
-            l.work_date >= startDate &&
-            l.work_date <= targetEndIso
-        );
-        const loggedDatesSet = new Set(logsInCalcWindow.map((l) => l.work_date));
-        const isFridaysOffEnabled = w.wage_type === 'daily' && Boolean(w.fridays_off);
-
-        const unloggedFridays =
-          !notStartedYet && isFridaysOffEnabled
-            ? countUnloggedFridaysBetween(startDate, targetEndIso, loggedDatesSet)
-            : 0;
-        const explicitAbsentFridays =
-          !notStartedYet && isFridaysOffEnabled
-            ? logsInCalcWindow.filter((l) => isFridayIso(l.work_date) && l.status === 'absent')
-                .length
-            : 0;
-        const fridaysOffCount = unloggedFridays + explicitAbsentFridays;
-
-        const calendarAbsentDays = logsInCalcWindow.filter((l) => l.status === 'absent').length;
-        const halfDaysCount = logsInCalcWindow.filter((l) => l.status === 'half').length;
-        const manualAbsentDays = Number(w.manual_absent_days || 0);
-        const totalAbsentDays = calendarAbsentDays + manualAbsentDays;
-
-        let rawCalculatedDays = 0;
-        if (!notStartedYet) {
-          if (autoCount) {
-            const loggedDatesCount = logsInCalcWindow.length;
-            const loggedDaysSum = logsInCalcWindow.reduce(
-              (s, l) => s + Number(l.days_equiv || 0),
-              0
-            );
-            const unloggedDays = Math.max(
-              0,
-              activeWindowDays - loggedDatesCount - unloggedFridays
-            );
-            rawCalculatedDays = Math.max(0, unloggedDays + loggedDaysSum - manualAbsentDays);
-          } else {
-            rawCalculatedDays = Math.max(
-              0,
-              logsInCalcWindow.reduce((s, l) => s + Number(l.days_equiv || 0), 0) - manualAbsentDays
-            );
-          }
-        }
-
-        const isDaysManuallyEdited =
-          w.manual_worked_days !== null && w.manual_worked_days !== undefined;
-
-        const effectiveDaysToToday = isDaysManuallyEdited
-          ? Math.max(0, Number(w.manual_worked_days))
-          : rawCalculatedDays;
-
-        const loggedOvertimeHours = logsInCalcWindow.reduce(
-          (s, l) => s + Number(l.overtime_hours || 0),
-          0
-        );
-        const effectiveOvertimeHours =
-          w.manual_overtime_hours !== null && w.manual_overtime_hours !== undefined
-            ? Math.max(0, Number(w.manual_overtime_hours))
-            : loggedOvertimeHours;
-
-        const bonusToToday = logsInCalcWindow.reduce(
-          (s, l) => s + Number(l.bonus_amount || 0),
-          0
-        );
-
-        const dailyRate =
-          w.wage_type === 'daily'
-            ? Number(w.base_wage || 0)
-            : Number(w.base_wage || 0) / 30;
-
-        const baseEarnedToToday = Math.round(effectiveDaysToToday * dailyRate);
-        const overtimeEarnedToToday = Math.round(
-          effectiveOvertimeHours * Number(w.overtime_rate || 0)
-        );
-
-        const workerPaymentsToToday = allPayments.filter(
-          (p) => p.worker_id === w.id && p.payment_date >= startDate
-        );
-
-        const deductionsToToday = workerPaymentsToToday
-          .filter((p) => p.payment_type === 'deduction')
-          .reduce((s, p) => s + Number(p.amount || 0), 0);
-
-        const paidToToday = workerPaymentsToToday
-          .filter((p) => p.payment_type === 'advance' || p.payment_type === 'salary')
-          .reduce((s, p) => s + Number(p.amount || 0), 0);
-
-        const grossEarnedToToday =
-          baseEarnedToToday + overtimeEarnedToToday + bonusToToday - deductionsToToday;
-        const netPayableToToday = grossEarnedToToday - paidToToday;
-
-        const projectedRemainingWage =
-          remainingDaysToWork !== null ? Math.round(remainingDaysToWork * dailyRate) : null;
-
-        return {
-          workerId: w.id,
-          startDate,
-          endDate,
-          todayIso,
-          calcMode,
-          notStartedYet,
-          isPeriodFinished,
-          calendarDaysElapsedToToday,
-          remainingDaysToWork,
-          totalPeriodDays,
-          calendarAbsentDays,
-          manualAbsentDays,
-          totalAbsentDays,
-          fridaysOffCount,
-          halfDaysCount,
-          rawCalculatedDays,
-          effectiveDaysToToday,
-          isDaysManuallyEdited,
-          loggedOvertimeHours,
-          effectiveOvertimeHours,
-          baseEarnedToToday,
-          overtimeEarnedToToday,
-          bonusToToday,
-          deductionsToToday,
-          grossEarnedToToday,
-          paidToToday,
-          netPayableToToday,
-          projectedRemainingWage,
-          periodLogs,
-        };
-      });
-
-      // 2. Calculate monthly summary for selected Shamsi month
-      const monthFirstIso = shamsiToIso(shamsiYear, shamsiMonth, 1);
-      const summaries = workers.map((w) => {
-        const wLogs = monthLogs.filter((l) => l.worker_id === w.id && l.work_date <= todayIso);
-        const mRec = monthlyRecords.find((r) => r.worker_id === w.id);
-        const wPayments = payments.filter((p) => p.worker_id === w.id);
-
-        const startDate = w.start_date || monthFirstIso;
-        const endDate = w.end_date || null;
-
-        const monthLen = shamsiMonth <= 6 ? 31 : shamsiMonth <= 11 ? 30 : 29;
-        const monthLastIso = shamsiToIso(shamsiYear, shamsiMonth, monthLen);
-
-        const activeRangeStart = startDate > monthFirstIso ? startDate : monthFirstIso;
-        let activeRangeEnd = todayIso < monthLastIso ? todayIso : monthLastIso;
-        if (endDate && endDate < activeRangeEnd) {
-          activeRangeEnd = endDate;
-        }
-
-        const logsInActiveRange = wLogs.filter(
-          (l) => l.work_date >= activeRangeStart && l.work_date <= activeRangeEnd
-        );
-        const isFridaysOffEnabled = w.wage_type === 'daily' && Boolean(w.fridays_off);
-
-        let loggedDays = 0;
-        if (w.auto_count_days !== 0 && activeRangeStart <= activeRangeEnd) {
-          const elapsedInMonth = Math.max(0, diffDaysInclusive(activeRangeStart, activeRangeEnd));
-          const loggedDatesSet = new Set(logsInActiveRange.map((l) => l.work_date));
-          const unloggedFridays = isFridaysOffEnabled
-            ? countUnloggedFridaysBetween(activeRangeStart, activeRangeEnd, loggedDatesSet)
-            : 0;
-          const sumLogged = logsInActiveRange.reduce((s, l) => s + Number(l.days_equiv || 0), 0);
-          const unloggedCount = Math.max(
-            0,
-            elapsedInMonth - logsInActiveRange.length - unloggedFridays
-          );
-          loggedDays = unloggedCount + sumLogged;
-        } else {
-          loggedDays = wLogs.reduce((sum, l) => sum + Number(l.days_equiv || 0), 0);
-        }
-
-        const loggedOvertime = wLogs.reduce((sum, l) => sum + Number(l.overtime_hours || 0), 0);
-        const dailyBonuses = wLogs.reduce((sum, l) => sum + Number(l.bonus_amount || 0), 0);
-
-        const presentCount = wLogs.filter((l) => l.status === 'present').length;
-        const halfCount = wLogs.filter((l) => l.status === 'half').length;
-        const absentCount = wLogs.filter((l) => l.status === 'absent').length;
-        const leaveCount = wLogs.filter((l) => l.status === 'paid_leave').length;
-
-        const effectiveDays =
-          mRec && mRec.manual_days !== null && mRec.manual_days !== undefined
-            ? Number(mRec.manual_days)
-            : loggedDays;
-
-        const effectiveOvertime =
-          mRec && mRec.manual_overtime !== null && mRec.manual_overtime !== undefined
-            ? Number(mRec.manual_overtime)
-            : loggedOvertime;
-
-        const monthlyBonus = mRec ? Number(mRec.monthly_bonus || 0) : 0;
-
-        const dailyRate =
-          w.wage_type === 'daily'
-            ? Number(w.base_wage || 0)
-            : Number(w.base_wage || 0) / 30;
-
-        const baseEarned = Math.round(effectiveDays * dailyRate);
-        const overtimeEarned = Math.round(effectiveOvertime * Number(w.overtime_rate || 0));
-        const totalBonus = dailyBonuses + monthlyBonus;
-        const totalDeductions = wPayments
-          .filter((p) => p.payment_type === 'deduction')
-          .reduce((s, p) => s + Number(p.amount || 0), 0);
-
-        const totalPaid = wPayments
-          .filter((p) => p.payment_type === 'advance' || p.payment_type === 'salary')
-          .reduce((s, p) => s + Number(p.amount || 0), 0);
-
-        const grossEarned = baseEarned + overtimeEarned + totalBonus - totalDeductions;
-        const remainingBalance = grossEarned - totalPaid;
-
-        return {
-          workerId: w.id,
-          loggedDays,
-          loggedOvertime,
-          effectiveDays,
-          effectiveOvertime,
-          isManualOverride: Boolean(
-            mRec &&
-              ((mRec.manual_days !== null && mRec.manual_days !== undefined) ||
-                (mRec.manual_overtime !== null && mRec.manual_overtime !== undefined) ||
-                Number(mRec.monthly_bonus || 0) !== 0)
-          ),
-          manualDays: mRec ? mRec.manual_days : null,
-          manualOvertime: mRec ? mRec.manual_overtime : null,
-          monthlyBonus,
-          monthlyNote: mRec ? mRec.note : '',
-          dailyBonuses,
-          presentCount,
-          halfCount,
-          absentCount,
-          leaveCount,
-          baseEarned,
-          overtimeEarned,
-          totalBonus,
-          totalDeductions,
-          grossEarned,
-          totalPaid,
-          remainingBalance,
-        };
-      });
-
       res.json({
         todayIso,
         projects,
         workers,
-        dailyLogs,
         allLogs,
-        monthLogs,
-        summaries,
-        accruedSummaries,
-        payments,
         allPayments,
         dbFileSizeKb: Math.round((fs.statSync(DB_PATH).size / 1024) * 10) / 10,
       });
@@ -1386,6 +1050,33 @@ async function startServer() {
     }
   });
 
+  // Bulk toggle fridays_off for daily-wage workers in a project (atomic transaction)
+  app.post('/api/workers/bulk-fridays-off', (req, res) => {
+    try {
+      const { project_id, enabled } = req.body;
+      const flag = enabled ? 1 : 0;
+      db.exec('BEGIN TRANSACTION;');
+      try {
+        if (project_id !== undefined && project_id !== null && project_id !== 'all') {
+          db.prepare(
+            "UPDATE workers SET fridays_off = ?, manual_worked_days = NULL WHERE wage_type = 'daily' AND project_id = ?"
+          ).run(flag, Number(project_id));
+        } else {
+          db.prepare(
+            "UPDATE workers SET fridays_off = ?, manual_worked_days = NULL WHERE wage_type = 'daily'"
+          ).run(flag);
+        }
+        db.exec('COMMIT;');
+      } catch (inner) {
+        db.exec('ROLLBACK;');
+        throw inner;
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Delete worker
   app.delete('/api/workers/:id', (req, res) => {
     try {
@@ -1494,54 +1185,12 @@ async function startServer() {
     }
   });
 
-  // Upsert monthly batch record
-  app.post('/api/monthly-records', (req, res) => {
-    try {
-      const { worker_id, shamsi_year, shamsi_month, manual_days, manual_overtime, monthly_bonus, note } = req.body;
-      if (!worker_id || !shamsi_year || !shamsi_month) {
-        return res.status(400).json({ error: 'اطلاعات کارگر و ماه الزامی است' });
-      }
-
-      const parsedDays =
-        manual_days === '' || manual_days === null || manual_days === undefined
-          ? null
-          : Number(manual_days);
-      const parsedOvertime =
-        manual_overtime === '' || manual_overtime === null || manual_overtime === undefined
-          ? null
-          : Number(manual_overtime);
-
-      db.prepare(`
-        INSERT INTO monthly_records
-          (worker_id, shamsi_year, shamsi_month, manual_days, manual_overtime, monthly_bonus, note)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(worker_id, shamsi_year, shamsi_month) DO UPDATE SET
-          manual_days = excluded.manual_days,
-          manual_overtime = excluded.manual_overtime,
-          monthly_bonus = excluded.monthly_bonus,
-          note = excluded.note
-      `).run(
-        Number(worker_id),
-        Number(shamsi_year),
-        Number(shamsi_month),
-        parsedDays,
-        parsedOvertime,
-        Number(monthly_bonus) || 0,
-        String(note || '').trim()
-      );
-
-      res.json({ ok: true });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
   // Add payment
   app.post('/api/payments', (req, res) => {
     try {
       const { project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note } = req.body;
-      if (!worker_id || !amount) {
-        return res.status(400).json({ error: 'انتخاب کارگر و مبلغ الزامی است' });
+      if (!worker_id || !amount || Number(amount) <= 0) {
+        return res.status(400).json({ error: 'انتخاب کارگر و مبلغ معتبر الزامی است' });
       }
       const iso = payment_date || getTodayIso();
       const sh = isoToShamsi(iso);
@@ -1551,7 +1200,7 @@ async function startServer() {
       const workerRow = db.prepare('SELECT project_id FROM workers WHERE id = ?').get(Number(worker_id)) as any;
       const resolvedProjectId = Number(project_id) || workerRow?.project_id || 1;
 
-      db.prepare(`
+      const info = db.prepare(`
         INSERT INTO payments (project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
@@ -1565,7 +1214,7 @@ async function startServer() {
         String(note || '').trim()
       );
 
-      res.json({ ok: true });
+      res.json({ ok: true, id: Number(info.lastInsertRowid) });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1694,23 +1343,36 @@ async function startServer() {
             );
           }
         }
+        const existingProjects = db.prepare('SELECT id FROM projects ORDER BY id ASC').all() as Array<{ id: number }>;
+        if (existingProjects.length === 0) {
+          const info = db
+            .prepare('INSERT INTO projects (name, description, color, active) VALUES (?, ?, ?, 1)')
+            .run('پروژه الف', 'پروژه اصلی', 'emerald');
+          existingProjects.push({ id: Number(info.lastInsertRowid) });
+        }
+        const validProjectIds = new Set(existingProjects.map((p) => Number(p.id)));
+        const fallbackProjectId = Number(existingProjects[0].id);
+
         const insW = db.prepare(
           `INSERT INTO workers (
             id, project_id, name, role, phone, wage_type, base_wage, overtime_rate,
             start_date, end_date, calc_mode, manual_worked_days, manual_absent_days, manual_overtime_hours,
-            auto_count_days, active, notes, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            auto_count_days, fridays_off, active, notes, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         for (const w of workers) {
+          const resolvedProjId = validProjectIds.has(Number(w.project_id))
+            ? Number(w.project_id)
+            : fallbackProjectId;
           insW.run(
             w.id,
-            w.project_id ?? 1,
+            resolvedProjId,
             w.name,
-            w.role,
-            w.phone,
-            w.wage_type,
-            w.base_wage,
-            w.overtime_rate,
+            w.role ?? 'کارگر',
+            w.phone ?? '',
+            w.wage_type === 'monthly' ? 'monthly' : 'daily',
+            Number(w.base_wage) || 0,
+            Number(w.overtime_rate) || 0,
             w.start_date || getTodayIso(),
             w.end_date || null,
             w.calc_mode || 'to_today',
@@ -1718,6 +1380,7 @@ async function startServer() {
             w.manual_absent_days ?? 0,
             w.manual_overtime_hours ?? null,
             w.auto_count_days ?? 1,
+            w.fridays_off ?? 0,
             w.active ?? 1,
             w.notes ?? '',
             w.created_at ?? ''
@@ -1744,7 +1407,10 @@ async function startServer() {
             'INSERT INTO payments (id, project_id, worker_id, payment_date, shamsi_year, shamsi_month, amount, payment_type, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
           );
           for (const p of payments) {
-            insP.run(p.id, p.project_id ?? 1, p.worker_id, p.payment_date, p.shamsi_year, p.shamsi_month, p.amount, p.payment_type, p.note ?? '', p.created_at ?? '');
+            const resolvedProjId = validProjectIds.has(Number(p.project_id))
+              ? Number(p.project_id)
+              : fallbackProjectId;
+            insP.run(p.id, resolvedProjId, p.worker_id, p.payment_date, p.shamsi_year, p.shamsi_month, p.amount, p.payment_type, p.note ?? '', p.created_at ?? '');
           }
         }
         db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('initial_seed_done', '1')").run();
@@ -1757,6 +1423,11 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
+  });
+
+  // Explicit JSON 404 for unknown API endpoints
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'مسیر API یافت نشد' });
   });
 
   if (process.env.NODE_ENV !== 'production') {

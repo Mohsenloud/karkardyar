@@ -4,7 +4,6 @@ import {
   CalendarRange,
   Wallet,
   Users,
-  Download,
   FolderKanban,
   Plus,
   Edit2,
@@ -31,7 +30,6 @@ import {
 } from './utils/jalali';
 import {
   computeWorkerAccruedSummary,
-  computeWorkerMonthlySummary,
 } from './utils/calculations';
 import { DailyAttendanceView } from './components/DailyAttendanceView';
 import { MonthlySheetView } from './components/MonthlySheetView';
@@ -40,9 +38,9 @@ import { WorkersView } from './components/WorkersView';
 import {
   AuthView,
   SecurityModal,
+  downloadAuthenticatedFile,
   getAuthHeaders,
   setStoredAuthToken,
-  withAuthQuery,
 } from './components/AuthView';
 import {
   PROJECT_COLOR_KEYS,
@@ -54,13 +52,11 @@ import {
 type ActiveTab = 'monthly' | 'daily' | 'payments' | 'workers';
 
 export default function App() {
-  const todayIso = getTodayIso();
-  const initialShamsi = isoToShamsi(todayIso);
+  const [serverTodayIso, setServerTodayIso] = useState<string>(() => getTodayIso());
+  const todayIso = serverTodayIso;
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('monthly');
-  const [selectedDate, setSelectedDate] = useState<string>(todayIso);
-  const [shamsiYear, setShamsiYear] = useState<number>(initialShamsi.jy);
-  const [shamsiMonth, setShamsiMonth] = useState<number>(initialShamsi.jm);
+  const [selectedDate, setSelectedDate] = useState<string>(() => getTodayIso());
 
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | 'all'>(1);
@@ -129,55 +125,65 @@ export default function App() {
     }, 2200);
   };
 
-  const fetchAllData = useCallback(
-    async (dateIso = selectedDate, jy = shamsiYear, jm = shamsiMonth) => {
-      try {
-        setErrorMsg(null);
-        const params = new URLSearchParams({
-          workDate: dateIso,
-          shamsiYear: String(jy),
-          shamsiMonth: String(jm),
-        });
-        const res = await fetch(`/api/bootstrap?${params.toString()}`, {
-          headers: getAuthHeaders(),
-        });
-        if (res.status === 401) {
-          const errBody = await res.json().catch(() => ({}));
-          if (errBody.requireSetup) {
-            setIsAuthSetup(false);
-          }
-          setIsAuthenticated(false);
-          return;
-        }
-        if (!res.ok) {
-          throw new Error('خطا در ارتباط با سرور SQLite');
-        }
-        const data: BootstrapResponse = await res.json();
-        const loadedProjects = data.projects || [];
-        setProjects(loadedProjects);
-        setSelectedProjectId((prev) => {
-          if (prev === 'all') return 'all';
-          if (loadedProjects.some((p) => p.id === prev)) return prev;
-          return loadedProjects[0]?.id ?? 'all';
-        });
-        setWorkers(data.workers || []);
-        setAllLogs(data.allLogs || []);
-        setAllPayments(data.allPayments || []);
-        setDbFileSizeKb(data.dbFileSizeKb || 0);
-      } catch (err: any) {
-        setErrorMsg(err.message || 'خطا در بارگذاری اطلاعات');
-      } finally {
-        setLoading(false);
+  const apiRequest = useCallback(async (url: string, options: RequestInit = {}) => {
+    const res = await fetch(url, {
+      ...options,
+      credentials: 'same-origin',
+      headers: getAuthHeaders(options.headers as Record<string, string> | undefined),
+    });
+
+    if (res.status === 401) {
+      const errBody = await res.json().catch(() => ({}));
+      if (errBody.requireSetup) {
+        setIsAuthSetup(false);
       }
-    },
-    [selectedDate, shamsiYear, shamsiMonth]
-  );
+      setIsAuthenticated(false);
+      throw new Error(errBody.error || 'نشست امنیتی شما منقضی شده است. لطفاً مجدداً وارد شوید.');
+    }
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'خطا در ارتباط با سرور');
+    }
+    return data;
+  }, []);
+
+  const fetchAllData = useCallback(async () => {
+    try {
+      setErrorMsg(null);
+      const data: BootstrapResponse = await apiRequest('/api/bootstrap');
+      if (data.todayIso) {
+        setServerTodayIso((prev) => {
+          if (selectedDate === prev && data.todayIso !== prev) {
+            setSelectedDate(data.todayIso);
+          }
+          return data.todayIso;
+        });
+      }
+      const loadedProjects = data.projects || [];
+      setProjects(loadedProjects);
+      setSelectedProjectId((prev) => {
+        if (prev === 'all') return 'all';
+        if (loadedProjects.some((p) => p.id === prev)) return prev;
+        return loadedProjects[0]?.id ?? 'all';
+      });
+      setWorkers(data.workers || []);
+      setAllLogs(data.allLogs || []);
+      setAllPayments(data.allPayments || []);
+      setDbFileSizeKb(data.dbFileSizeKb || 0);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در بارگذاری اطلاعات');
+    } finally {
+      setLoading(false);
+    }
+  }, [apiRequest, selectedDate]);
 
   useEffect(() => {
     const checkAuthAndLoad = async () => {
       try {
         const res = await fetch('/api/auth/status', {
           headers: getAuthHeaders(),
+          credentials: 'same-origin',
         });
         if (res.ok) {
           const status = await res.json();
@@ -188,7 +194,7 @@ export default function App() {
           }
           setAuthChecked(true);
           if (status.isSetup && status.authenticated) {
-            await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+            await fetchAllData();
           } else {
             setLoading(false);
           }
@@ -260,17 +266,6 @@ export default function App() {
     [allLogs, selectedDate, projectWorkerIds]
   );
 
-  const monthLogs = useMemo(
-    () =>
-      allLogs.filter(
-        (l) =>
-          l.shamsi_year === shamsiYear &&
-          l.shamsi_month === shamsiMonth &&
-          projectWorkerIds.has(l.worker_id)
-      ),
-    [allLogs, shamsiYear, shamsiMonth, projectWorkerIds]
-  );
-
   const payments = useMemo(
     () => allPayments.filter((p) => projectWorkerIds.has(p.worker_id)),
     [allPayments, projectWorkerIds]
@@ -290,21 +285,6 @@ export default function App() {
     () =>
       allWorkersAccruedSummaries.filter((a) => projectWorkerIds.has(a.workerId)),
     [allWorkersAccruedSummaries, projectWorkerIds]
-  );
-
-  const summaries = useMemo(
-    () =>
-      projectWorkers.map((w) =>
-        computeWorkerMonthlySummary(
-          w,
-          allLogs,
-          allPayments,
-          shamsiYear,
-          shamsiMonth,
-          todayIso
-        )
-      ),
-    [projectWorkers, allLogs, allPayments, shamsiYear, shamsiMonth, todayIso]
   );
 
   // Per-project statistics (how many workers, how many worked days, total earned, total paid, net payable)
@@ -332,11 +312,6 @@ export default function App() {
 
   const handleSelectDate = (iso: string) => {
     setSelectedDate(iso);
-    const sh = isoToShamsi(iso);
-    if (sh.jy !== shamsiYear || sh.jm !== shamsiMonth) {
-      setShamsiYear(sh.jy);
-      setShamsiMonth(sh.jm);
-    }
   };
 
   // Project CRUD handlers
@@ -345,12 +320,13 @@ export default function App() {
     if (!projectNameInput.trim()) return;
 
     if (editingProjectId) {
+      const targetId = editingProjectId;
       const updatedName = projectNameInput.trim();
       const updatedDesc = projectDescInput.trim();
       const updatedColor = projectColorInput;
       setProjects((prev) =>
         prev.map((p) =>
-          p.id === editingProjectId
+          p.id === targetId
             ? { ...p, name: updatedName, description: updatedDesc, color: updatedColor }
             : p
         )
@@ -358,36 +334,42 @@ export default function App() {
       setEditingProjectId(null);
       setProjectNameInput('');
       setProjectDescInput('');
-      showToast('مشخصات و رنگ پروژه ویرایش شد');
 
-      fetch(`/api/projects/${editingProjectId}`, {
-        method: 'PUT',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          name: updatedName,
-          description: updatedDesc,
-          color: updatedColor,
-        }),
-      }).catch(() => setErrorMsg('خطا در ویرایش پروژه'));
+      try {
+        await apiRequest(`/api/projects/${targetId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: updatedName,
+            description: updatedDesc,
+            color: updatedColor,
+          }),
+        });
+        showToast('مشخصات و رنگ پروژه ویرایش شد');
+      } catch (err: any) {
+        setErrorMsg(err.message || 'خطا در ویرایش پروژه');
+        fetchAllData();
+      }
     } else {
-      const res = await fetch('/api/projects', {
-        method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          name: projectNameInput.trim(),
-          description: projectDescInput.trim(),
-          color: projectColorInput,
-        }),
-      });
-      if (res.ok) {
-        const created = await res.json();
-        await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+      try {
+        const created = await apiRequest('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: projectNameInput.trim(),
+            description: projectDescInput.trim(),
+            color: projectColorInput,
+          }),
+        });
+        await fetchAllData();
         if (created?.id) {
           setSelectedProjectId(Number(created.id));
         }
         setProjectNameInput('');
         setProjectDescInput('');
         showToast('پروژه جدید ایجاد شد');
+      } catch (err: any) {
+        setErrorMsg(err.message || 'خطا در ایجاد پروژه');
       }
     }
   };
@@ -397,14 +379,13 @@ export default function App() {
       showToast('حداقل یک پروژه باید باقی بماند');
       return;
     }
-    const res = await fetch(`/api/projects/${id}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(),
-    });
-    if (res.ok) {
+    try {
+      await apiRequest(`/api/projects/${id}`, { method: 'DELETE' });
       setConfirmDeleteProjectId(null);
-      await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+      await fetchAllData();
       showToast('پروژه و حساب‌های آن حذف شد');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در حذف پروژه');
     }
   };
 
@@ -466,13 +447,16 @@ export default function App() {
       return [...filtered, updatedLog];
     });
 
-    fetch('/api/daily-log', {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(payload),
-    }).catch(() => {
-      setErrorMsg('خطا در ذخیره خودکار');
-    });
+    try {
+      await apiRequest('/api/daily-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در ذخیره خودکار');
+      fetchAllData();
+    }
   };
 
   // Optimistic 0ms bulk mark present for active project workers
@@ -513,23 +497,25 @@ export default function App() {
       return next;
     });
 
-    showToast(`حضور کارگران «${activeProjectName}» ثبت شد`);
-
-    fetch('/api/daily-log/bulk', {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({
-        work_date: selectedDate,
-        status: 'present',
-        project_name: projectName || activeProjectName,
-        project_id: selectedProjectId === 'all' ? undefined : selectedProjectId,
-      }),
-    }).catch(() => {
-      setErrorMsg('خطا در ثبت گروهی');
-    });
+    try {
+      await apiRequest('/api/daily-log/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          work_date: selectedDate,
+          status: 'present',
+          project_name: projectName || activeProjectName,
+          project_id: selectedProjectId === 'all' ? undefined : selectedProjectId,
+        }),
+      });
+      showToast(`حضور کارگران «${activeProjectName}» ثبت شد`);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در ثبت گروهی');
+      fetchAllData();
+    }
   };
 
-  // Optimistic 0ms payment creation
+  // Payment creation awaiting real DB ID to prevent 404 on immediate edit/delete
   const handleAddPayment = async (payload: {
     worker_id: number;
     payment_date: string;
@@ -543,30 +529,37 @@ export default function App() {
     const resolvedProjectId =
       w?.project_id || (selectedProjectId !== 'all' ? selectedProjectId : 1);
 
-    const optimisticPayment: PaymentRecord = {
-      id: Date.now(),
-      project_id: resolvedProjectId,
-      worker_id: payload.worker_id,
-      worker_name: w?.name || '',
-      worker_role: w?.role || '',
-      payment_date: payload.payment_date,
-      shamsi_year: payload.shamsi_year,
-      shamsi_month: payload.shamsi_month,
-      amount: payload.amount,
-      payment_type: payload.payment_type,
-      note: payload.note,
-    };
+    try {
+      const result = await apiRequest('/api/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
+      });
 
-    setAllPayments((prev) => [optimisticPayment, ...prev]);
-    showToast('تراکنش مالی ثبت شد');
-
-    fetch('/api/payments', {
-      method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
-    })
-      .then(() => fetchAllData(selectedDate, shamsiYear, shamsiMonth))
-      .catch(() => setErrorMsg('خطا در ثبت پرداخت'));
+      const realId = Number(result?.id);
+      if (realId) {
+        const createdPayment: PaymentRecord = {
+          id: realId,
+          project_id: resolvedProjectId,
+          worker_id: payload.worker_id,
+          worker_name: w?.name || '',
+          worker_role: w?.role || '',
+          payment_date: payload.payment_date,
+          shamsi_year: payload.shamsi_year,
+          shamsi_month: payload.shamsi_month,
+          amount: payload.amount,
+          payment_type: payload.payment_type,
+          note: payload.note,
+        };
+        setAllPayments((prev) => [createdPayment, ...prev]);
+      } else {
+        await fetchAllData();
+      }
+      showToast('تراکنش مالی ثبت شد');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در ثبت پرداخت');
+      fetchAllData();
+    }
   };
 
   const handleQuickSettleWorker = (
@@ -576,7 +569,7 @@ export default function App() {
     customNote?: string,
     paymentDateIso?: string
   ) => {
-    const chosenDate = paymentDateIso || getTodayIso();
+    const chosenDate = paymentDateIso || todayIso;
     const sh = isoToShamsi(chosenDate);
     const defaultNote =
       paymentType === 'advance'
@@ -629,24 +622,29 @@ export default function App() {
           : p
       )
     );
-    showToast('تراکنش ویرایش شد');
 
-    fetch(`/api/payments/${payload.id}`, {
-      method: 'PUT',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
-    })
-      .then(() => fetchAllData(selectedDate, shamsiYear, shamsiMonth))
-      .catch(() => setErrorMsg('خطا در ویرایش تراکنش'));
+    try {
+      await apiRequest(`/api/payments/${payload.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, project_id: resolvedProjectId }),
+      });
+      showToast('تراکنش ویرایش شد');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در ویرایش تراکنش');
+      fetchAllData();
+    }
   };
 
   const handleDeletePayment = async (id: number) => {
     setAllPayments((prev) => prev.filter((p) => p.id !== id));
-    showToast('تراکنش حذف شد');
-    fetch(`/api/payments/${id}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(),
-    }).catch(() => setErrorMsg('خطا در حذف تراکنش'));
+    try {
+      await apiRequest(`/api/payments/${id}`, { method: 'DELETE' });
+      showToast('تراکنش حذف شد');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در حذف تراکنش');
+      fetchAllData();
+    }
   };
 
   // Optimistic 0ms worker update
@@ -714,20 +712,27 @@ export default function App() {
         )
       );
 
-      fetch(`/api/workers/${payload.id}`, {
-        method: 'PUT',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(payload),
-      }).catch(() => setErrorMsg('خطا در ذخیره اطلاعات کارگر'));
+      try {
+        await apiRequest(`/api/workers/${payload.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (err: any) {
+        setErrorMsg(err.message || 'خطا در ذخیره اطلاعات کارگر');
+        fetchAllData();
+      }
     } else {
-      const res = await fetch('/api/workers', {
-        method: 'POST',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
-        await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+      try {
+        await apiRequest('/api/workers', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        await fetchAllData();
         showToast(`کارگر جدید در «${projName}» ثبت شد`);
+      } catch (err: any) {
+        setErrorMsg(err.message || 'خطا در ثبت کارگر جدید');
       }
     }
   };
@@ -768,8 +773,8 @@ export default function App() {
     });
   };
 
-  // Toggle Friday holiday mode for all daily-wage workers in the active project
-  const handleToggleAllDailyWorkersFridaysOff = (enabled: boolean) => {
+  // Toggle Friday holiday mode for all daily-wage workers in the active project (single atomic request)
+  const handleToggleAllDailyWorkersFridaysOff = async (enabled: boolean) => {
     const dailyInProject = projectWorkers.filter((w) => w.wage_type === 'daily');
     if (dailyInProject.length === 0) return;
 
@@ -788,48 +793,52 @@ export default function App() {
       )
     );
 
-    showToast(
-      enabled
-        ? 'جمعه‌ها برای کارگران روزمزد تعطیل در نظر گرفته شد'
-        : 'جمعه‌ها به حالت کاری عادی برگشت'
-    );
-
-    for (const w of dailyInProject) {
-      fetch(`/api/workers/${w.id}`, {
-        method: 'PUT',
-        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+    try {
+      await apiRequest('/api/workers/bulk-fridays-off', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...w,
-          fridays_off: flag,
-          manual_worked_days: null,
+          project_id: selectedProjectId,
+          enabled,
         }),
-      }).catch(() => {});
+      });
+      showToast(
+        enabled
+          ? 'جمعه‌ها برای کارگران روزمزد تعطیل در نظر گرفته شد'
+          : 'جمعه‌ها به حالت کاری عادی برگشت'
+      );
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در بروزرسانی وضعیت جمعه‌ها');
+      fetchAllData();
     }
   };
 
   const handleDeleteWorker = async (id: number) => {
     setWorkers((prev) => prev.filter((w) => w.id !== id));
-    showToast('کارگر حذف شد');
-    fetch(`/api/workers/${id}`, {
-      method: 'DELETE',
-      headers: getAuthHeaders(),
-    }).catch(() => setErrorMsg('خطا در حذف کارگر'));
+    setAllLogs((prev) => prev.filter((l) => l.worker_id !== id));
+    setAllPayments((prev) => prev.filter((p) => p.worker_id !== id));
+    try {
+      await apiRequest(`/api/workers/${id}`, { method: 'DELETE' });
+      showToast('کارگر حذف شد');
+    } catch (err: any) {
+      setErrorMsg(err.message || 'خطا در حذف کارگر');
+      fetchAllData();
+    }
   };
 
   const handleRestoreBackup = async (backupData: any) => {
-    const res = await fetch('/api/restore/json', {
+    await apiRequest('/api/restore/json', {
       method: 'POST',
-      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(backupData),
     });
-    if (!res.ok) throw new Error('خطا در بازیابی فایل پشتیبان');
-    await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+    await fetchAllData();
   };
 
   if (!authChecked) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4">
-        <div className="w-12 h-12 rounded-2xl bg-emerald-100 animate-pulse" />
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="w-11 h-11 rounded-2xl bg-slate-200 animate-pulse" />
       </div>
     );
   }
@@ -843,17 +852,17 @@ export default function App() {
           setIsAuthSetup(true);
           setIsAuthenticated(true);
           setLoading(true);
-          await fetchAllData(selectedDate, shamsiYear, shamsiMonth);
+          await fetchAllData();
         }}
       />
     );
   }
 
   return (
-    <div className="min-h-screen flex flex-col text-slate-900 pb-20 md:pb-10">
+    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 pb-20 md:pb-12">
       {/* Top Bar Contract: 3 Zones separated by gap-8 */}
-      <header className="sticky top-0 z-30 bg-white/90 backdrop-blur-md border-b border-emerald-100 shadow-2xs no-print">
-        <div className="max-w-4xl mx-auto flex items-center justify-between gap-8 px-3.5 sm:px-5 h-13">
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200/80 no-print">
+        <div className="max-w-6xl mx-auto flex items-center justify-between gap-4 sm:gap-8 px-3 sm:px-6 h-12 md:h-14">
           {/* Zone 1: Single text element wordmark */}
           <a
             href="#monthly"
@@ -861,23 +870,23 @@ export default function App() {
               e.preventDefault();
               setActiveTab('monthly');
             }}
-            className="text-base sm:text-lg font-extrabold tracking-tight bg-gradient-to-l from-emerald-600 to-teal-700 bg-clip-text text-transparent whitespace-nowrap shrink-0"
+            className="text-base sm:text-lg font-extrabold tracking-tight text-emerald-700 hover:text-emerald-800 transition-colors whitespace-nowrap shrink-0"
           >
             کارکردیار
           </a>
 
           {/* Zone 2: 4 concise single-line text navigation links (Desktop) */}
-          <nav className="hidden md:flex items-center gap-6 text-xs font-medium text-slate-600">
+          <nav className="hidden md:flex items-center gap-7 h-full text-xs lg:text-[13px] font-medium text-slate-600">
             <a
               href="#monthly"
               onClick={(e) => {
                 e.preventDefault();
                 setActiveTab('monthly');
               }}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
+              className={`h-full inline-flex items-center border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'monthly'
-                  ? 'text-emerald-700 font-bold underline underline-offset-8 decoration-2 decoration-emerald-500'
-                  : 'hover:text-emerald-600'
+                  ? 'border-emerald-700 text-slate-950 font-bold'
+                  : 'border-transparent hover:text-slate-900'
               }`}
             >
               ورود و خروج و کارکرد
@@ -888,10 +897,10 @@ export default function App() {
                 e.preventDefault();
                 setActiveTab('daily');
               }}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
+              className={`h-full inline-flex items-center border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'daily'
-                  ? 'text-emerald-700 font-bold underline underline-offset-8 decoration-2 decoration-emerald-500'
-                  : 'hover:text-emerald-600'
+                  ? 'border-emerald-700 text-slate-950 font-bold'
+                  : 'border-transparent hover:text-slate-900'
               }`}
             >
               حضور روزانه
@@ -902,10 +911,10 @@ export default function App() {
                 e.preventDefault();
                 setActiveTab('payments');
               }}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
+              className={`h-full inline-flex items-center border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'payments'
-                  ? 'text-emerald-700 font-bold underline underline-offset-8 decoration-2 decoration-emerald-500'
-                  : 'hover:text-emerald-600'
+                  ? 'border-emerald-700 text-slate-950 font-bold'
+                  : 'border-transparent hover:text-slate-900'
               }`}
             >
               مساعده و تسویه
@@ -916,50 +925,41 @@ export default function App() {
                 e.preventDefault();
                 setActiveTab('workers');
               }}
-              className={`py-1 transition-colors whitespace-nowrap shrink-0 ${
+              className={`h-full inline-flex items-center border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'workers'
-                  ? 'text-emerald-700 font-bold underline underline-offset-8 decoration-2 decoration-emerald-500'
-                  : 'hover:text-emerald-600'
+                  ? 'border-emerald-700 text-slate-950 font-bold'
+                  : 'border-transparent hover:text-slate-900'
               }`}
             >
               کارگران و دیتابیس
             </a>
           </nav>
 
-          {/* Zone 3: Security & SQLite Backup Actions */}
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setShowSecurityModal(true)}
-              className="h-8 px-2.5 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-all inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-              title="تغییر نام کاربری، رمز عبور و خروج"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-              <span>امنیت و رمز</span>
-            </button>
-            <a
-              href={withAuthQuery('/api/backup/sqlite')}
-              download
-              className="h-8 px-3 text-[11px] font-bold text-white bg-gradient-to-l from-emerald-500 to-teal-600 rounded-lg hover:from-emerald-600 hover:to-teal-700 shadow-2xs transition-all inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-            >
-              <Download className="w-3 h-3" />
-              <span>پشتیبان SQLite</span>
-            </a>
-          </div>
+          {/* Zone 3: Single Primary Account & Security Action */}
+          <button
+            type="button"
+            onClick={() => setShowSecurityModal(true)}
+            className="h-8 sm:h-9 px-2.5 sm:px-3 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200/80 border border-slate-200/80 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            title="تنظیمات حساب، رمز ورود و پشتیبان‌گیری"
+          >
+            <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+            <span className="hidden sm:inline">حساب و امنیت</span>
+            <span className="sm:hidden">حساب</span>
+          </button>
         </div>
       </header>
 
       {/* Main Content Container */}
-      <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-5 pt-3 sm:pt-4 space-y-3.5">
-        {/* Project Selector & Management Bar — Compact Dropdown for Mobile & Desktop */}
-        <section className="relative z-30 bg-white/95 backdrop-blur-md border border-slate-200/80 rounded-2xl p-2.5 sm:px-3.5 sm:py-2.5 flex items-center justify-between gap-2 shadow-xs no-print">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 pt-2.5 sm:pt-5 space-y-3 sm:space-y-4">
+        {/* Project Selector & Management Bar */}
+        <section className="relative z-20 bg-white border border-slate-200/90 rounded-xl sm:rounded-2xl px-2.5 py-2 sm:px-4 sm:py-2.5 flex items-center justify-between gap-2 no-print">
           <div className="flex items-center gap-2 min-w-0" ref={projectDropdownRef}>
-            <span className="hidden xs:inline-flex sm:inline-flex items-center gap-1 text-[11px] font-bold text-slate-500 shrink-0">
-              <FolderKanban className="w-3.5 h-3.5 text-slate-600" />
-              <span>پروژه:</span>
+            <span className="hidden sm:inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 shrink-0">
+              <FolderKanban className="w-4 h-4 text-slate-400" />
+              <span>پروژه فعال:</span>
             </span>
 
-            <div className="relative">
+            <div className="relative min-w-0">
               {(() => {
                 const isAll = selectedProjectId === 'all';
                 const activeIdx = projects.findIndex((p) => p.id === selectedProjectId);
@@ -977,25 +977,21 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setShowProjectDropdown((prev) => !prev)}
-                    className={`h-9 px-3 rounded-xl text-xs font-extrabold inline-flex items-center gap-2 transition-all whitespace-nowrap shadow-2xs ${
+                    className={`h-9 sm:min-h-[38px] px-3 sm:px-3.5 rounded-xl text-xs sm:text-[13px] font-bold inline-flex items-center gap-1.5 sm:gap-2 transition-colors whitespace-nowrap max-w-full ${
                       isAll
-                        ? 'bg-slate-800 text-white hover:bg-slate-700'
+                        ? 'bg-slate-900 text-white hover:bg-slate-800'
                         : activeTheme.activeTabBtn
                     }`}
                   >
-                    <span
-                      className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                        isAll ? 'bg-emerald-400' : 'bg-white ring-2 ring-white/30'
-                      }`}
-                    />
-                    <span className="truncate max-w-[140px] sm:max-w-[220px]">
+                    <span className="truncate max-w-[140px] sm:max-w-[260px]">
                       {activeProjectName}
                     </span>
-                    <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono-num bg-white/20 text-white shrink-0">
-                      {toPersianDigits(activeCount)} نفر
+                    <span className="text-[11px] font-normal font-mono-num text-white/80 shrink-0">
+                      · {toPersianDigits(activeCount)}
+                      <span className="hidden sm:inline"> نفر</span>
                     </span>
                     <ChevronDown
-                      className={`w-3.5 h-3.5 shrink-0 transition-transform duration-200 ${
+                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 text-white/85 transition-transform duration-200 ${
                         showProjectDropdown ? 'rotate-180' : ''
                       }`}
                     />
@@ -1005,13 +1001,13 @@ export default function App() {
 
               {/* Dropdown Menu List */}
               {showProjectDropdown && (
-                <div className="absolute right-0 top-full mt-1.5 z-50 w-64 sm:w-72 bg-white border border-slate-200/90 rounded-2xl shadow-xl p-1.5 space-y-1 animate-in fade-in zoom-in-95 duration-150">
-                  <div className="px-2.5 py-1 text-[10px] font-bold text-slate-400 flex items-center justify-between">
-                    <span>انتخاب پروژه فعال</span>
-                    <span>تعداد کارگر</span>
+                <div className="absolute right-0 top-full mt-2 z-50 w-64 sm:w-80 bg-white border border-slate-200 rounded-2xl shadow-lg p-1.5 space-y-1">
+                  <div className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 flex items-center justify-between">
+                    <span>انتخاب پروژه</span>
+                    <span>کارگران</span>
                   </div>
 
-                  <div className="max-h-60 overflow-y-auto space-y-1 pr-0.5">
+                  <div className="max-h-64 overflow-y-auto space-y-0.5">
                     {projects.map((pr, idx) => {
                       const isSelected = selectedProjectId === pr.id;
                       const prTheme = getProjectTheme(pr.color, idx);
@@ -1027,24 +1023,24 @@ export default function App() {
                             setSelectedProjectId(pr.id);
                             setShowProjectDropdown(false);
                           }}
-                          className={`w-full h-9 px-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-all ${
+                          className={`w-full min-h-[42px] px-3 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-colors ${
                             isSelected
-                              ? `${prTheme.lightBg} ${prTheme.lightText} border ${prTheme.lightBorder}`
-                              : 'text-slate-700 hover:bg-slate-50 border border-transparent'
+                              ? `${prTheme.lightBg} ${prTheme.lightText}`
+                              : 'text-slate-700 hover:bg-slate-50'
                           }`}
                         >
-                          <div className="flex items-center gap-2 min-w-0">
+                          <div className="flex items-center gap-2.5 min-w-0">
                             <span
                               className={`w-2.5 h-2.5 rounded-full shrink-0 ${prTheme.dotClass}`}
                             />
-                            <span className="truncate font-extrabold">{pr.name}</span>
+                            <span className="truncate">{pr.name}</span>
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[10px] font-mono-num font-bold">
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[11px] font-mono-num font-medium text-slate-500">
                               {toPersianDigits(prWorkersCount)} نفر
                             </span>
-                            {isSelected && <Check className="w-3.5 h-3.5 shrink-0" />}
+                            {isSelected && <Check className="w-4 h-4 shrink-0" />}
                           </div>
                         </button>
                       );
@@ -1052,35 +1048,30 @@ export default function App() {
                   </div>
 
                   {projects.length > 1 && (
-                    <div className="pt-1 border-t border-slate-100">
+                    <div className="pt-1.5 mt-1 border-t border-slate-100">
                       <button
                         type="button"
                         onClick={() => {
                           setSelectedProjectId('all');
                           setShowProjectDropdown(false);
                         }}
-                        className={`w-full h-9 px-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-all ${
+                        className={`w-full min-h-[42px] px-3 rounded-xl text-xs font-bold flex items-center justify-between gap-2 transition-colors ${
                           selectedProjectId === 'all'
                             ? 'bg-slate-900 text-white'
-                            : 'text-slate-700 hover:bg-slate-100'
+                            : 'text-slate-700 hover:bg-slate-50'
                         }`}
                       >
+                        <span>همه پروژه‌ها (مجموع کل)</span>
                         <div className="flex items-center gap-2">
-                          <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shrink-0" />
-                          <span className="font-extrabold">همه پروژه‌ها (مجموع)</span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
                           <span
-                            className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono-num font-bold ${
-                              selectedProjectId === 'all'
-                                ? 'bg-white/20 text-white'
-                                : 'bg-slate-100 text-slate-700'
+                            className={`text-[11px] font-mono-num font-medium ${
+                              selectedProjectId === 'all' ? 'text-slate-300' : 'text-slate-500'
                             }`}
                           >
                             {toPersianDigits(workers.length)} نفر
                           </span>
                           {selectedProjectId === 'all' && (
-                            <Check className="w-3.5 h-3.5 shrink-0" />
+                            <Check className="w-4 h-4 shrink-0" />
                           )}
                         </div>
                       </button>
@@ -1102,20 +1093,21 @@ export default function App() {
               setProjectColorInput(nextColor);
               setShowProjectsModal(true);
             }}
-            className="w-fit h-9 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-extrabold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 shadow-2xs"
+            className="h-9 sm:min-h-[38px] px-3 sm:px-3.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
           >
-            <Plus className="w-3.5 h-3.5 text-emerald-300" />
-            <span>تعریف و حساب پروژه‌ها</span>
+            <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-400 shrink-0" />
+            <span className="hidden sm:inline">تعریف و حساب پروژه‌ها</span>
+            <span className="sm:hidden">پروژه‌ها</span>
           </button>
         </section>
 
         {errorMsg && (
-          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
+          <div className="p-3 rounded-xl sm:rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center justify-between gap-3">
             <span>{errorMsg}</span>
             <button
               type="button"
-              onClick={() => fetchAllData(selectedDate, shamsiYear, shamsiMonth)}
-              className="px-3 py-1 rounded-lg bg-rose-600 text-white font-semibold"
+              onClick={() => fetchAllData()}
+              className="h-8 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold whitespace-nowrap shrink-0 transition-colors"
             >
               تلاش مجدد
             </button>
@@ -1123,17 +1115,17 @@ export default function App() {
         )}
 
         {toastMsg && (
-          <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl bg-gradient-to-l from-emerald-600 to-teal-700 text-white text-xs font-bold shadow-lg shadow-emerald-900/20">
+          <div className="fixed top-14 sm:top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-bold shadow-lg whitespace-nowrap">
             {toastMsg}
           </div>
         )}
 
         {loading ? (
-          <div className="space-y-4">
-            <div className="h-28 rounded-2xl bg-emerald-100/50 animate-pulse" />
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-              <div className="h-40 rounded-2xl bg-sky-100/50 animate-pulse" />
-              <div className="h-40 rounded-2xl bg-amber-100/50 animate-pulse" />
+          <div className="space-y-3 sm:space-y-4">
+            <div className="h-28 sm:h-32 rounded-2xl bg-slate-200/70 animate-pulse" />
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">
+              <div className="h-40 rounded-2xl bg-slate-200/60 animate-pulse" />
+              <div className="h-40 rounded-2xl bg-slate-200/60 animate-pulse" />
             </div>
           </div>
         ) : (
@@ -1142,16 +1134,9 @@ export default function App() {
               <MonthlySheetView
                 activeProjectName={activeProjectName}
                 activeProjectColor={activeProjectColor}
-                shamsiYear={shamsiYear}
-                shamsiMonth={shamsiMonth}
-                onChangeMonth={(y, m) => {
-                  setShamsiYear(y);
-                  setShamsiMonth(m);
-                }}
+                todayIso={todayIso}
                 workers={projectWorkers}
-                summaries={summaries}
                 accruedSummaries={accruedSummaries}
-                monthLogs={monthLogs}
                 payments={payments}
                 viewMode={workerViewMode}
                 onChangeViewMode={handleChangeWorkerViewMode}
@@ -1165,6 +1150,7 @@ export default function App() {
 
             {activeTab === 'daily' && (
               <DailyAttendanceView
+                todayIso={todayIso}
                 selectedDate={selectedDate}
                 onSelectDate={handleSelectDate}
                 workers={projectWorkers}
@@ -1176,17 +1162,16 @@ export default function App() {
                 onBulkMarkPresent={handleBulkMarkPresent}
                 onOpenNewWorker={() => setActiveTab('workers')}
                 onOpenAccruedSheet={() => setActiveTab('monthly')}
-                savingWorkerId={null}
               />
             )}
 
             {activeTab === 'payments' && (
               <PaymentsView
                 activeProjectName={activeProjectName}
-                shamsiYear={shamsiYear}
-                shamsiMonth={shamsiMonth}
+                selectedProjectId={selectedProjectId}
+                todayIso={todayIso}
                 workers={projectWorkers}
-                summaries={summaries}
+                accruedSummaries={accruedSummaries}
                 payments={payments}
                 onAddPayment={handleAddPayment}
                 onUpdatePayment={handleUpdatePayment}
@@ -1196,6 +1181,7 @@ export default function App() {
 
             {activeTab === 'workers' && (
               <WorkersView
+                todayIso={todayIso}
                 projects={projects}
                 selectedProjectId={selectedProjectId}
                 workers={projectWorkers}
@@ -1210,242 +1196,251 @@ export default function App() {
         )}
       </main>
 
-      {/* Separate Modal Window for Defining Projects & Viewing Isolated Project Accounts */}
+      {/* Projects Management & Isolated Accounts Modal */}
       {showProjectsModal && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
           onClick={() => setShowProjectsModal(false)}
         >
           <div
-            className="bg-white border border-emerald-100 rounded-2xl max-w-lg w-full p-4 sm:p-5 space-y-4 shadow-2xl max-h-[90vh] flex flex-col"
+            className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-2xl w-full max-h-[92dvh] flex flex-col shadow-xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3 shrink-0">
-              <div className="flex items-center gap-2">
-                <FolderKanban className="w-5 h-5 text-emerald-600" />
-                <div>
-                  <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
-                    مدیریت پروژه‌ها و تفکیک حساب‌ها
-                  </h3>
-                  <p className="text-[11px] text-slate-500">
-                    تعریف پروژه جدید و مشاهده خلاصه کارکرد و حساب هر پروژه
-                  </p>
-                </div>
+            {/* Mobile Sheet Handle */}
+            <div className="sm:hidden pt-2.5 pb-1 flex justify-center shrink-0">
+              <span className="w-10 h-1 rounded-full bg-slate-300" />
+            </div>
+
+            <div className="flex items-center justify-between px-4 sm:px-5 py-3 border-b border-slate-100 shrink-0">
+              <div>
+                <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+                  مدیریت پروژه‌ها و حساب‌ها
+                </h3>
+                <p className="text-[11px] sm:text-xs text-slate-500 mt-0.5">
+                  تعریف پروژه جدید و مشاهده تراز مالی هر پروژه
+                </p>
               </div>
               <button
                 type="button"
                 onClick={() => setShowProjectsModal(false)}
-                className="w-8 h-8 rounded-lg border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100"
+                aria-label="بستن"
+                className="w-9 h-9 rounded-xl border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Form to Add / Edit Project with Color Picker */}
-            <form
-              onSubmit={handleSaveProject}
-              className="bg-slate-50 border border-slate-200/90 rounded-2xl p-3.5 space-y-3 shrink-0"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-extrabold text-slate-900">
-                  {editingProjectId ? 'ویرایش مشخصات و رنگ پروژه' : 'تعریف پروژه جدید'}
-                </span>
-                {editingProjectId && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingProjectId(null);
-                      setProjectNameInput('');
-                      setProjectDescInput('');
-                    }}
-                    className="text-[11px] text-slate-500 hover:text-slate-800"
-                  >
-                    انصراف از ویرایش
-                  </button>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <input
-                  type="text"
-                  value={projectNameInput}
-                  onChange={(e) => setProjectNameInput(e.target.value)}
-                  placeholder="نام پروژه (مثلاً: پروژه ج - ساختمان ولنجک)"
-                  className="h-9 px-3 rounded-xl border border-slate-300 bg-white text-xs focus:outline-none focus:border-emerald-600"
-                  required
-                />
-                <input
-                  type="text"
-                  value={projectDescInput}
-                  onChange={(e) => setProjectDescInput(e.target.value)}
-                  placeholder="توضیح یا آدرس (اختیاری)"
-                  className="h-9 px-3 rounded-xl border border-slate-300 bg-white text-xs focus:outline-none focus:border-emerald-600"
-                />
-              </div>
-
-              {/* Project Color Swatch Selector */}
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[11px] font-bold text-slate-600 ml-1">
-                    رنگ پروژه:
+            <div className="p-3.5 sm:p-5 space-y-3.5 sm:space-y-4 overflow-y-auto">
+              {/* Form to Add / Edit Project */}
+              <form
+                onSubmit={handleSaveProject}
+                className="bg-slate-50 border border-slate-200/90 rounded-2xl p-3.5 sm:p-4 space-y-2.5 sm:space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-extrabold text-slate-900">
+                    {editingProjectId ? 'ویرایش مشخصات پروژه' : 'تعریف پروژه جدید'}
                   </span>
-                  {PROJECT_COLOR_KEYS.map((cKey) => {
-                    const palette = PROJECT_THEMES[cKey];
-                    const isPicked = projectColorInput === cKey;
-                    return (
-                      <button
-                        key={cKey}
-                        type="button"
-                        onClick={() => setProjectColorInput(cKey)}
-                        className={`w-fit h-7 px-2.5 rounded-lg text-[10px] font-bold inline-flex items-center gap-1.5 border transition-all ${
-                          isPicked
-                            ? `${palette.swatchClass} text-white border-transparent shadow-xs scale-105`
-                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                        }`}
-                      >
-                        <span
-                          className={`w-2.5 h-2.5 rounded-full ${
-                            isPicked ? 'bg-white' : palette.dotClass
-                          }`}
-                        />
-                        <span>{palette.label}</span>
-                      </button>
-                    );
-                  })}
+                  {editingProjectId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingProjectId(null);
+                        setProjectNameInput('');
+                        setProjectDescInput('');
+                      }}
+                      className="text-xs font-semibold text-slate-500 hover:text-slate-800"
+                    >
+                      انصراف
+                    </button>
+                  )}
                 </div>
 
-                <button
-                  type="submit"
-                  className="w-fit h-8 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1 shadow-2xs"
-                >
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>{editingProjectId ? 'ذخیره ویرایش' : 'ثبت پروژه جدید'}</span>
-                </button>
-              </div>
-            </form>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={projectNameInput}
+                    onChange={(e) => setProjectNameInput(e.target.value)}
+                    placeholder="نام پروژه (مثلاً: پروژه ولنجک)"
+                    className="h-10 px-3 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm focus:border-emerald-600"
+                    required
+                  />
+                  <input
+                    type="text"
+                    value={projectDescInput}
+                    onChange={(e) => setProjectDescInput(e.target.value)}
+                    placeholder="توضیح یا آدرس (اختیاری)"
+                    className="h-10 px-3 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm focus:border-emerald-600"
+                  />
+                </div>
 
-            {/* List of Projects with Isolated Worker & Financial Summary */}
-            <div className="space-y-2.5 overflow-y-auto pr-0.5 font-mono-num">
-              {projectStatsList.map((item, idx) => {
-                const isCurrent = selectedProjectId === item.project.id;
-                const prTheme = getProjectTheme(item.project.color, idx);
-                return (
-                  <div
-                    key={item.project.id}
-                    className={`rounded-2xl p-3 border transition-all space-y-2.5 ${prTheme.cardSoftBg} ${prTheme.cardBorder}`}
+                {/* Color Picker + Submit */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {PROJECT_COLOR_KEYS.map((cKey) => {
+                      const palette = PROJECT_THEMES[cKey];
+                      const isPicked = projectColorInput === cKey;
+                      return (
+                        <button
+                          key={cKey}
+                          type="button"
+                          onClick={() => setProjectColorInput(cKey)}
+                          title={palette.label}
+                          className={`h-8 px-2 sm:px-2.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1.5 border transition-colors ${
+                            isPicked
+                              ? `${palette.swatchClass} text-white border-transparent`
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          <span
+                            className={`w-2.5 h-2.5 rounded-full ${
+                              isPicked ? 'bg-white' : palette.dotClass
+                            }`}
+                          />
+                          <span className="hidden sm:inline">{palette.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="h-9 px-3.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className={`w-2.5 h-2.5 rounded-full ${prTheme.dotClass}`} />
-                          <h4 className="text-sm font-extrabold text-slate-900">
-                            {item.project.name}
-                          </h4>
-                          {isCurrent && (
-                            <span className="w-fit px-2 py-0.5 rounded-md bg-slate-900 text-white text-[9px] font-bold">
-                              پروژه فعال
-                            </span>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>{editingProjectId ? 'ذخیره' : 'ثبت پروژه'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {/* List of Projects — Clean Single-Elevation Rows */}
+              <div className="space-y-2.5 font-mono-num">
+                {projectStatsList.map((item, idx) => {
+                  const isCurrent = selectedProjectId === item.project.id;
+                  const prTheme = getProjectTheme(item.project.color, idx);
+                  return (
+                    <div
+                      key={item.project.id}
+                      className={`bg-white rounded-2xl p-3.5 sm:p-4 border transition-colors space-y-2.5 ${
+                        isCurrent
+                          ? `${prTheme.cardBorder} ring-1 ring-inset ring-slate-200`
+                          : 'border-slate-200/90'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`w-2.5 h-2.5 rounded-full shrink-0 ${prTheme.dotClass}`}
+                            />
+                            <h4 className="text-sm font-extrabold text-slate-900 truncate">
+                              {item.project.name}
+                            </h4>
+                            {isCurrent && (
+                              <span className="text-[11px] font-bold text-emerald-700 shrink-0">
+                                · فعال
+                              </span>
+                            )}
+                          </div>
+                          {item.project.description && (
+                            <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                              {item.project.description}
+                            </p>
                           )}
                         </div>
-                        {item.project.description && (
-                          <p className="text-[11px] text-slate-600 mt-0.5">
-                            {item.project.description}
-                          </p>
-                        )}
-                      </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectedProjectId(item.project.id);
-                            setShowProjectsModal(false);
-                          }}
-                          className={`w-fit h-8 px-2.5 rounded-xl text-[11px] font-extrabold transition-all ${prTheme.activeTabBtn}`}
-                        >
-                          مشاهده پروژه
-                        </button>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedProjectId(item.project.id);
+                              setShowProjectsModal(false);
+                            }}
+                            className={`h-8 px-2.5 rounded-lg text-xs font-bold transition-colors ${prTheme.activeTabBtn}`}
+                          >
+                            مشاهده
+                          </button>
 
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingProjectId(item.project.id);
-                            setProjectNameInput(item.project.name);
-                            setProjectDescInput(item.project.description || '');
-                            setProjectColorInput(prTheme.key);
-                          }}
-                          className="w-8 h-8 rounded-xl bg-white border border-slate-200 text-slate-600 hover:text-slate-900 flex items-center justify-center shadow-2xs"
-                          title="ویرایش نام و رنگ پروژه"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingProjectId(item.project.id);
+                              setProjectNameInput(item.project.name);
+                              setProjectDescInput(item.project.description || '');
+                              setProjectColorInput(prTheme.key);
+                            }}
+                            className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 flex items-center justify-center transition-colors"
+                            title="ویرایش پروژه"
+                            aria-label="ویرایش پروژه"
+                          >
+                            <Edit2 className="w-3.5 h-3.5" />
+                          </button>
 
-                        {projects.length > 1 && (
-                          <>
-                            {confirmDeleteProjectId === item.project.id ? (
-                              <div className="flex items-center gap-1">
+                          {projects.length > 1 && (
+                            <>
+                              {confirmDeleteProjectId === item.project.id ? (
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteProject(item.project.id)}
+                                    className="h-8 px-2 rounded-lg bg-rose-600 text-white text-[11px] font-bold"
+                                  >
+                                    حذف
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteProjectId(null)}
+                                    className="h-8 px-2 rounded-lg bg-slate-100 text-[11px] text-slate-600 font-semibold"
+                                  >
+                                    لغو
+                                  </button>
+                                </div>
+                              ) : (
                                 <button
                                   type="button"
-                                  onClick={() => handleDeleteProject(item.project.id)}
-                                  className="w-fit h-8 px-2 rounded-lg bg-rose-600 text-white text-[10px] font-bold"
+                                  onClick={() => setConfirmDeleteProjectId(item.project.id)}
+                                  className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-rose-50 text-slate-400 hover:text-rose-600 flex items-center justify-center transition-colors"
+                                  title="حذف پروژه"
+                                  aria-label="حذف پروژه"
                                 >
-                                  حذف
+                                  <Trash2 className="w-3.5 h-3.5" />
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setConfirmDeleteProjectId(null)}
-                                  className="w-fit h-8 px-2 rounded-lg bg-white text-[10px] text-slate-600"
-                                >
-                                  لغو
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteProjectId(item.project.id)}
-                                className="w-8 h-8 rounded-xl bg-white border border-slate-200 text-slate-400 hover:text-rose-600 flex items-center justify-center shadow-2xs"
-                                title="حذف پروژه"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </>
-                        )}
+                              )}
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
 
-                    {/* Isolated Project Metrics */}
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-center bg-white/95 rounded-xl p-2 border border-white shadow-2xs">
-                      <div>
-                        <span className="text-[9px] text-slate-500 block">تعداد کارگران</span>
-                        <span className="text-xs font-extrabold text-slate-900">
-                          {toPersianDigits(item.workersCount)} نفر
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-[9px] text-slate-500 block">مجموع کارکرد</span>
-                        <span className={`text-xs font-extrabold ${prTheme.accentText}`}>
-                          {toPersianDigits(item.totalDays)} روز
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-[9px] text-slate-500 block">مساعده پرداختی</span>
-                        <span className="text-xs font-extrabold text-amber-700">
-                          {formatToman(item.totalPaid)} ت
-                        </span>
-                      </div>
-                      <div>
-                        <span className={`text-[9px] font-bold block ${prTheme.accentText}`}>
-                          مانده حساب پروژه
-                        </span>
-                        <span className={`text-xs font-extrabold ${prTheme.accentText}`}>
-                          {formatToman(item.netPayable)} ت
-                        </span>
+                      {/* Hairline-divided metrics */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2.5 border-t border-slate-100 text-right">
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">کارگران</span>
+                          <span className="text-xs font-bold text-slate-900">
+                            {toPersianDigits(item.workersCount)} نفر
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">مجموع کارکرد</span>
+                          <span className="text-xs font-bold text-slate-900">
+                            {toPersianDigits(item.totalDays)} روز
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">مساعده</span>
+                          <span className="text-xs font-bold text-amber-700">
+                            {formatToman(item.totalPaid)} ت
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 block">مانده حساب</span>
+                          <span className={`text-xs font-extrabold ${prTheme.accentText}`}>
+                            {formatToman(item.netPayable)} ت
+                          </span>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -1460,60 +1455,83 @@ export default function App() {
             showToast('نام کاربری و رمز عبور بروزرسانی شد');
           }}
           onLogout={handleLogout}
+          onDownloadSqliteBackup={async () => {
+            const ok = await downloadAuthenticatedFile(
+              '/api/backup/sqlite',
+              `karkard-backup-${todayIso}.sqlite`
+            );
+            if (!ok) {
+              setErrorMsg('خطا در دانلود فایل پشتیبان SQLite');
+            } else {
+              showToast('فایل پشتیبان SQLite دانلود شد');
+            }
+          }}
         />
       )}
 
-      {/* Mobile Fixed Bottom Navigation Bar (Natural Thumb Zone) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-emerald-100 shadow-lg no-print">
-        <div className="grid grid-cols-4 items-center h-16 px-1.5">
+      {/* Mobile Fixed Bottom Navigation Bar (Sticky budget < 15% of viewport) */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur-md border-t border-slate-200/90 pb-safe no-print">
+        <div className="grid grid-cols-4 items-stretch h-[58px]">
           <button
             type="button"
             onClick={() => setActiveTab('monthly')}
-            className={`min-h-[48px] rounded-2xl flex flex-col items-center justify-center transition-all ${
+            className={`relative min-h-[44px] flex flex-col items-center justify-center transition-colors ${
               activeTab === 'monthly'
-                ? 'text-emerald-700 font-bold bg-emerald-50/90'
+                ? 'text-emerald-700 font-bold'
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
+            {activeTab === 'monthly' && (
+              <span className="absolute top-0 inset-x-5 h-0.5 bg-emerald-700 rounded-b-full" />
+            )}
             <CalendarRange className="w-5 h-5" />
-            <span className="text-[11px] mt-1 whitespace-nowrap">ورود/خروج و کارکرد</span>
+            <span className="text-[11px] mt-1 whitespace-nowrap">کارکرد</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('daily')}
-            className={`min-h-[48px] rounded-2xl flex flex-col items-center justify-center transition-all ${
+            className={`relative min-h-[44px] flex flex-col items-center justify-center transition-colors ${
               activeTab === 'daily'
-                ? 'text-emerald-700 font-bold bg-emerald-50/90'
+                ? 'text-emerald-700 font-bold'
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
+            {activeTab === 'daily' && (
+              <span className="absolute top-0 inset-x-5 h-0.5 bg-emerald-700 rounded-b-full" />
+            )}
             <CalendarCheck className="w-5 h-5" />
-            <span className="text-[11px] mt-1 whitespace-nowrap">حضور روزانه</span>
+            <span className="text-[11px] mt-1 whitespace-nowrap">حضور</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('payments')}
-            className={`min-h-[48px] rounded-2xl flex flex-col items-center justify-center transition-all ${
+            className={`relative min-h-[44px] flex flex-col items-center justify-center transition-colors ${
               activeTab === 'payments'
-                ? 'text-emerald-700 font-bold bg-emerald-50/90'
+                ? 'text-emerald-700 font-bold'
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
+            {activeTab === 'payments' && (
+              <span className="absolute top-0 inset-x-5 h-0.5 bg-emerald-700 rounded-b-full" />
+            )}
             <Wallet className="w-5 h-5" />
-            <span className="text-[11px] mt-1 whitespace-nowrap">مساعده و مالی</span>
+            <span className="text-[11px] mt-1 whitespace-nowrap">مالی</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('workers')}
-            className={`min-h-[48px] rounded-2xl flex flex-col items-center justify-center transition-all ${
+            className={`relative min-h-[44px] flex flex-col items-center justify-center transition-colors ${
               activeTab === 'workers'
-                ? 'text-emerald-700 font-bold bg-emerald-50/90'
+                ? 'text-emerald-700 font-bold'
                 : 'text-slate-500 hover:text-slate-800'
             }`}
           >
+            {activeTab === 'workers' && (
+              <span className="absolute top-0 inset-x-5 h-0.5 bg-emerald-700 rounded-b-full" />
+            )}
             <Users className="w-5 h-5" />
             <span className="text-[11px] mt-1 whitespace-nowrap">کارگران</span>
           </button>

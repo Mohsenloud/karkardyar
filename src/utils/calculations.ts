@@ -5,7 +5,7 @@ import {
   Worker,
   WorkerMonthlySummary,
 } from '../types';
-import { addDaysIso, isFridayIso, isoToShamsi, shamsiToIso } from './jalali';
+import { addDaysIso, getShamsiMonthLength, isFridayIso, isoToShamsi, shamsiToIso } from './jalali';
 
 export function diffDaysInclusive(startIso: string, endIso: string): number {
   if (!startIso || !endIso || startIso > endIso) return 0;
@@ -227,7 +227,7 @@ export function computeWorkerMonthlySummary(
   todayIso: string
 ): WorkerMonthlySummary {
   const monthFirstIso = shamsiToIso(shamsiYear, shamsiMonth, 1);
-  const monthLen = shamsiMonth <= 6 ? 31 : shamsiMonth <= 11 ? 30 : 29;
+  const monthLen = getShamsiMonthLength(shamsiYear, shamsiMonth);
   const monthLastIso = shamsiToIso(shamsiYear, shamsiMonth, monthLen);
 
   const wLogs = allLogs.filter(

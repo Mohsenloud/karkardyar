@@ -16,15 +16,21 @@ if [ -f "$LEGACY_DATA_DIR/karkard.sqlite" ] && [ ! -f "$PERSISTENT_DATA_DIR/kark
   cp -f "$LEGACY_DATA_DIR"/karkard.sqlite* "$PERSISTENT_DATA_DIR"/ 2>/dev/null || true
 fi
 
-# ۲. تهیه نسخه پشتیبان خودکار قبل از هرگونه آپدیت کد
+# ۲. ادغام فایل‌های WAL در فایل اصلی دیتابیس (اگر کانتینر در حال اجراست) قبل از بکاپ
+if docker compose ps --status running --services 2>/dev/null | grep -q "^karkardyar$"; then
+  echo "🔄 ادغام تراکنش‌های WAL در دیتابیس اصلی..."
+  docker compose exec -T karkardyar node -e "const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync('/app/data/karkard.sqlite'); db.exec('PRAGMA wal_checkpoint(TRUNCATE);'); db.close();" 2>/dev/null || true
+fi
+
+# ۳. تهیه نسخه پشتیبان خودکار قبل از هرگونه آپدیت کد
 if [ -f "$PERSISTENT_DATA_DIR/karkard.sqlite" ]; then
   cp -f "$PERSISTENT_DATA_DIR/karkard.sqlite" "$BACKUP_DIR/karkard-pre-update-$TIMESTAMP.sqlite"
-  cp -f "$PERSISTENT_DATA_DIR/karkard.sqlite" "/tmp/karkard-safe-snapshot.sqlite"
+  cp -f "$PERSISTENT_DATA_DIR"/karkard.sqlite* /tmp/ 2>/dev/null || true
   echo "✅ نسخه پشتیبان خودکار در $BACKUP_DIR/karkard-pre-update-$TIMESTAMP.sqlite ذخیره شد."
 elif [ -f "$LEGACY_DATA_DIR/karkard.sqlite" ]; then
-  cp -f "$LEGACY_DATA_DIR/karkard.sqlite" "$BACKUP_DIR/karkard-pre-update-$TIMESTAMP.sqlite"
-  cp -f "$LEGACY_DATA_DIR/karkard.sqlite" "$PERSISTENT_DATA_DIR/karkard.sqlite"
-  cp -f "$LEGACY_DATA_DIR/karkard.sqlite" "/tmp/karkard-safe-snapshot.sqlite"
+  cp -f "$LEGACY_DATA_DIR"/karkard.sqlite* "$PERSISTENT_DATA_DIR"/ 2>/dev/null || true
+  cp -f "$PERSISTENT_DATA_DIR/karkard.sqlite" "$BACKUP_DIR/karkard-pre-update-$TIMESTAMP.sqlite"
+  cp -f "$PERSISTENT_DATA_DIR"/karkard.sqlite* /tmp/ 2>/dev/null || true
   echo "✅ نسخه پشتیبان خودکار در $BACKUP_DIR/karkard-pre-update-$TIMESTAMP.sqlite ذخیره شد."
 fi
 
@@ -33,14 +39,12 @@ echo "🔄 دریافت آخرین تغییرات کد از گیت‌هاب (ب�
 git checkout -- "$LEGACY_DATA_DIR" 2>/dev/null || true
 git pull
 
-# ۳. اطمینان از اینکه فایل دیتابیس سرور پس از git pull دست‌نخورده باقی مانده است
-if [ -f "/tmp/karkard-safe-snapshot.sqlite" ]; then
+# ۴. اطمینان از اینکه فایل دیتابیس سرور در پوشه امن پس از git pull دست‌نخورده باقی مانده است
+if [ -f "/tmp/karkard.sqlite" ]; then
   if [ ! -f "$PERSISTENT_DATA_DIR/karkard.sqlite" ]; then
-    cp -f "/tmp/karkard-safe-snapshot.sqlite" "$PERSISTENT_DATA_DIR/karkard.sqlite"
+    cp -f /tmp/karkard.sqlite* "$PERSISTENT_DATA_DIR"/ 2>/dev/null || true
   fi
-  mkdir -p "$LEGACY_DATA_DIR"
-  cp -f "$PERSISTENT_DATA_DIR/karkard.sqlite" "$LEGACY_DATA_DIR/karkard.sqlite"
-  rm -f "/tmp/karkard-safe-snapshot.sqlite"
+  rm -f /tmp/karkard.sqlite* 2>/dev/null || true
 fi
 
 echo "🐳 ساخت مجدد ایمیج کدها و راه‌اندازی کانتینر داکر..."

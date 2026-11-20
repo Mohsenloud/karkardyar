@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Plus, Trash2, Wallet, Filter, Calendar, Edit2, Check, X } from 'lucide-react';
-import { PaymentRecord, Worker, WorkerMonthlySummary } from '../types';
+import { AccruedToTodaySummary, PaymentRecord, Worker } from '../types';
 import {
   PERSIAN_MONTHS,
   formatShamsiDayMonth,
   formatShamsiShort,
   formatToman,
   getShamsiMonthLength,
-  getTodayIso,
+  getShamsiYearOptions,
   isoToShamsi,
   shamsiToIso,
   toPersianDigits,
@@ -15,10 +15,10 @@ import {
 
 interface PaymentsViewProps {
   activeProjectName?: string;
-  shamsiYear: number;
-  shamsiMonth: number;
+  selectedProjectId: number | 'all';
+  todayIso: string;
   workers: Worker[];
-  summaries: WorkerMonthlySummary[];
+  accruedSummaries: AccruedToTodaySummary[];
   payments: PaymentRecord[];
   onAddPayment: (payload: {
     worker_id: number;
@@ -44,16 +44,15 @@ interface PaymentsViewProps {
 
 export const PaymentsView: React.FC<PaymentsViewProps> = ({
   activeProjectName = 'همه پروژه‌ها',
-  shamsiYear,
-  shamsiMonth,
+  selectedProjectId,
+  todayIso,
   workers,
-  summaries,
+  accruedSummaries,
   payments,
   onAddPayment,
   onUpdatePayment,
   onDeletePayment,
 }) => {
-  const todayIso = getTodayIso();
   const initialSh = isoToShamsi(todayIso);
 
   const activeWorkers = workers.filter((w) => w.active === 1);
@@ -61,14 +60,6 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   const [workerId, setWorkerId] = useState<string>(
     activeWorkers[0] ? String(activeWorkers[0].id) : ''
   );
-
-  React.useEffect(() => {
-    if (!workers.some((w) => String(w.id) === workerId)) {
-      setWorkerId(activeWorkers[0] ? String(activeWorkers[0].id) : '');
-    }
-    setFilterWorkerId('all');
-    setEditingPaymentId(null);
-  }, [workers]);
 
   const [paymentType, setPaymentType] = useState<'advance' | 'salary' | 'deduction'>('advance');
   const [payJy, setPayJy] = useState<number>(initialSh.jy);
@@ -78,9 +69,27 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
   const [note, setNote] = useState<string>('');
   const [filterWorkerId, setFilterWorkerId] = useState<string>('all');
   const [submitting, setSubmitting] = useState(false);
+  const [mobileSection, setMobileSection] = useState<'list' | 'form'>('list');
 
-  const selectedWorkerSummary = summaries.find((s) => s.workerId === Number(workerId));
-  const monthName = PERSIAN_MONTHS[shamsiMonth - 1];
+  // Reset filter & editing mode only when switching project
+  React.useEffect(() => {
+    setFilterWorkerId('all');
+    setEditingPaymentId(null);
+  }, [selectedProjectId]);
+
+  // Keep selected worker valid if the worker list changes
+  React.useEffect(() => {
+    if (!workers.some((w) => String(w.id) === workerId)) {
+      const firstActive = workers.find((w) => w.active === 1) || workers[0];
+      setWorkerId(firstActive ? String(firstActive.id) : '');
+    }
+    if (filterWorkerId !== 'all' && !workers.some((w) => String(w.id) === filterWorkerId)) {
+      setFilterWorkerId('all');
+    }
+  }, [workers, workerId, filterWorkerId]);
+
+  const selectedWorkerAccrued = accruedSummaries.find((a) => a.workerId === Number(workerId));
+  const yearOptions = getShamsiYearOptions(initialSh.jy, [payJy]);
 
   const handleStartEdit = (p: PaymentRecord) => {
     setEditingPaymentId(p.id);
@@ -92,6 +101,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
     setPayJd(sh.jd);
     setAmount(String(p.amount));
     setNote(p.note || '');
+    setMobileSection('form');
   };
 
   const handleCancelEdit = () => {
@@ -102,6 +112,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
     setPayJd(sh.jd);
     setAmount('');
     setNote('');
+    setMobileSection('list');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -138,6 +149,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       }
       setAmount('');
       setNote('');
+      setMobileSection('list');
     } finally {
       setSubmitting(false);
     }
@@ -148,28 +160,74 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       ? payments
       : payments.filter((p) => p.worker_id === Number(filterWorkerId));
 
+  const filteredTotal = filteredPayments.reduce((s, p) => s + Number(p.amount || 0), 0);
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-      {/* New / Edit Payment Form */}
-      <form
-        onSubmit={handleSubmit}
-        className={`lg:col-span-5 bg-white border rounded-3xl p-4 sm:p-5 space-y-4 shadow-xs transition-all ${
-          editingPaymentId !== null
-            ? 'border-amber-300 ring-2 ring-amber-200/70'
-            : 'border-emerald-100'
-        }`}
-      >
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+    <div className="space-y-3 lg:space-y-0">
+      {/* Mobile Segmented Switcher (List first for calm, zero-scroll browsing) */}
+      <div className="lg:hidden grid grid-cols-2 bg-slate-200/75 p-1 rounded-xl gap-1">
+        <button
+          type="button"
+          onClick={() => setMobileSection('list')}
+          className={`h-9 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
+            mobileSection === 'list'
+              ? 'bg-white text-slate-900 shadow-2xs'
+              : 'text-slate-600'
+          }`}
+        >
+          <span>لیست پرداختی‌ها</span>
+          <span className="text-[11px] font-mono-num text-slate-400">
+            ({toPersianDigits(payments.length)})
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMobileSection('form')}
+          className={`h-9 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-1.5 ${
+            mobileSection === 'form'
+              ? editingPaymentId !== null
+                ? 'bg-amber-600 text-white shadow-2xs'
+                : 'bg-emerald-700 text-white shadow-2xs'
+              : 'text-slate-600'
+          }`}
+        >
+          {editingPaymentId !== null ? (
+            <>
+              <Edit2 className="w-3.5 h-3.5" />
+              <span>ویرایش تراکنش</span>
+            </>
+          ) : (
+            <>
+              <Plus className="w-3.5 h-3.5" />
+              <span>ثبت جدید</span>
+            </>
+          )}
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 lg:gap-5 items-start">
+        {/* New / Edit Payment Form (Sticky on Desktop) */}
+        <form
+          onSubmit={handleSubmit}
+          className={`${
+            mobileSection === 'form' ? 'block' : 'hidden lg:block'
+          } lg:col-span-5 lg:sticky lg:top-20 bg-white border rounded-2xl p-4 sm:p-5 space-y-3.5 sm:space-y-4 transition-colors ${
+            editingPaymentId !== null
+              ? 'border-amber-400 ring-2 ring-amber-100'
+              : 'border-slate-200/90'
+          }`}
+        >
+        <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
+          <div className="flex items-center gap-2 min-w-0">
             <Wallet
-              className={`w-5 h-5 ${
-                editingPaymentId !== null ? 'text-amber-600' : 'text-emerald-600'
+              className={`w-5 h-5 shrink-0 ${
+                editingPaymentId !== null ? 'text-amber-600' : 'text-emerald-700'
               }`}
             />
-            <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+            <h2 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
               {editingPaymentId !== null
-                ? 'ویرایش رکورد پرداختی / مساعده'
-                : `ثبت مساعده یا تسویه — «${activeProjectName}»`}
+                ? 'ویرایش تراکنش مالی'
+                : `ثبت مساعده یا تسویه — ${activeProjectName}`}
             </h2>
           </div>
 
@@ -177,7 +235,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <button
               type="button"
               onClick={handleCancelEdit}
-              className="w-fit h-7 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1 transition-colors"
+              className="h-8 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold inline-flex items-center gap-1 transition-colors shrink-0"
             >
               <X className="w-3.5 h-3.5" />
               <span>انصراف</span>
@@ -186,11 +244,11 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1.5">انتخاب کارگر</label>
+          <label className="block text-xs font-bold text-slate-700 mb-1.5">انتخاب کارگر</label>
           <select
             value={workerId}
             onChange={(e) => setWorkerId(e.target.value)}
-            className="w-full h-11 px-3 rounded-xl border border-slate-300 bg-white text-sm"
+            className="w-full h-11 px-3.5 rounded-xl border border-slate-300 bg-white text-sm font-medium focus:border-emerald-600"
             required
           >
             <option value="">انتخاب کنید...</option>
@@ -203,22 +261,22 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         </div>
 
         {/* Selected Worker Quick Balance Hint */}
-        {selectedWorkerSummary && (
-          <div className="p-3 rounded-2xl bg-emerald-50/70 border border-emerald-200 flex items-center justify-between text-xs font-mono-num">
-            <span className="text-slate-600">مانده طلب در {monthName}:</span>
-            <div className="flex items-center gap-2">
+        {selectedWorkerAccrued && (
+          <div className="px-3.5 py-2.5 rounded-xl bg-emerald-50/70 border border-emerald-200/80 flex flex-wrap items-center justify-between gap-2 text-xs font-mono-num">
+            <span className="text-slate-600">مانده تا امروز:</span>
+            <div className="flex items-center gap-2.5">
               <span className="font-extrabold text-emerald-800">
-                {formatToman(selectedWorkerSummary.remainingBalance)} تومان
+                {formatToman(selectedWorkerAccrued.netPayableToToday)} تومان
               </span>
-              {selectedWorkerSummary.remainingBalance > 0 && (
+              {selectedWorkerAccrued.netPayableToToday > 0 && (
                 <button
                   type="button"
                   onClick={() => {
-                    setAmount(String(selectedWorkerSummary.remainingBalance));
+                    setAmount(String(selectedWorkerAccrued.netPayableToToday));
                     setPaymentType('salary');
-                    setNote(`تسویه کامل ${monthName}`);
+                    setNote(`تسویه کامل کارکرد تا ${formatShamsiDayMonth(todayIso)}`);
                   }}
-                  className="text-[11px] font-bold underline text-emerald-700 hover:text-emerald-900"
+                  className="text-xs font-bold underline text-emerald-700 hover:text-emerald-900"
                 >
                   درج کل مانده
                 </button>
@@ -228,25 +286,25 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         )}
 
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1.5">نوع تراکنش</label>
+          <label className="block text-xs font-bold text-slate-700 mb-1.5">نوع تراکنش</label>
           <div className="grid grid-cols-3 gap-2">
             <button
               type="button"
               onClick={() => setPaymentType('advance')}
-              className={`min-h-[42px] rounded-xl text-xs font-bold border transition-all ${
+              className={`min-h-[42px] px-2 rounded-xl text-xs font-bold border transition-colors ${
                 paymentType === 'advance'
-                  ? 'bg-gradient-to-l from-amber-500 to-orange-500 text-white border-amber-500 shadow-xs'
+                  ? 'bg-amber-600 text-white border-amber-600'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
               }`}
             >
-              مساعده (علی‌الحساب)
+              مساعده
             </button>
             <button
               type="button"
               onClick={() => setPaymentType('salary')}
-              className={`min-h-[42px] rounded-xl text-xs font-bold border transition-all ${
+              className={`min-h-[42px] px-2 rounded-xl text-xs font-bold border transition-colors ${
                 paymentType === 'salary'
-                  ? 'bg-gradient-to-l from-emerald-500 to-teal-600 text-white border-emerald-600 shadow-xs'
+                  ? 'bg-emerald-700 text-white border-emerald-700'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
               }`}
             >
@@ -255,9 +313,9 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <button
               type="button"
               onClick={() => setPaymentType('deduction')}
-              className={`min-h-[42px] rounded-xl text-xs font-bold border transition-all ${
+              className={`min-h-[42px] px-2 rounded-xl text-xs font-bold border transition-colors ${
                 paymentType === 'deduction'
-                  ? 'bg-gradient-to-l from-rose-500 to-red-600 text-white border-rose-600 shadow-xs'
+                  ? 'bg-rose-600 text-white border-rose-600'
                   : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
               }`}
             >
@@ -267,10 +325,10 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         </div>
 
         {/* Payment Date Selector */}
-        <div className="p-3 bg-slate-50 rounded-2xl border border-slate-200/90 space-y-2">
+        <div className="space-y-2 pt-1">
           <div className="flex items-center justify-between">
-            <label className="text-xs font-bold text-slate-700 inline-flex items-center gap-1">
-              <Calendar className="w-3.5 h-3.5 text-emerald-600" />
+            <label className="text-xs font-bold text-slate-700 inline-flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-slate-500" />
               <span>تاریخ پرداخت</span>
             </label>
             <button
@@ -281,7 +339,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 setPayJm(sh.jm);
                 setPayJd(sh.jd);
               }}
-              className="w-fit px-2 py-0.5 rounded-md bg-emerald-100 hover:bg-emerald-200 text-emerald-800 text-[10px] font-bold transition-colors"
+              className="text-xs font-bold text-emerald-700 hover:text-emerald-800"
             >
               امروز ({formatShamsiDayMonth(todayIso)})
             </button>
@@ -290,7 +348,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <select
               value={payJd}
               onChange={(e) => setPayJd(Number(e.target.value))}
-              className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+              className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold"
             >
               {Array.from(
                 { length: getShamsiMonthLength(payJy, payJm) },
@@ -303,8 +361,12 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             </select>
             <select
               value={payJm}
-              onChange={(e) => setPayJm(Number(e.target.value))}
-              className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+              onChange={(e) => {
+                const nextM = Number(e.target.value);
+                setPayJm(nextM);
+                setPayJd((prev) => Math.min(prev, getShamsiMonthLength(payJy, nextM)));
+              }}
+              className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold"
             >
               {PERSIAN_MONTHS.map((m, idx) => (
                 <option key={m} value={idx + 1}>
@@ -314,10 +376,14 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             </select>
             <select
               value={payJy}
-              onChange={(e) => setPayJy(Number(e.target.value))}
-              className="h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-semibold"
+              onChange={(e) => {
+                const nextY = Number(e.target.value);
+                setPayJy(nextY);
+                setPayJd((prev) => Math.min(prev, getShamsiMonthLength(nextY, payJm)));
+              }}
+              className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold"
             >
-              {[1403, 1404, 1405, 1406, 1407].map((y) => (
+              {yearOptions.map((y) => (
                 <option key={y} value={y}>
                   {toPersianDigits(y)}
                 </option>
@@ -328,9 +394,9 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
 
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <label className="text-xs font-medium text-slate-700">مبلغ (تومان)</label>
+            <label className="text-xs font-bold text-slate-700">مبلغ (تومان)</label>
             {amount && Number(amount) > 0 && (
-              <span className="text-xs font-bold text-emerald-700 font-mono-num">
+              <span className="text-xs font-extrabold text-emerald-700 font-mono-num">
                 {formatToman(Number(amount))} تومان
               </span>
             )}
@@ -341,8 +407,8 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             min="1"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            placeholder="هر مبلغ دلخواه (مثلاً: 1425000)"
-            className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm font-mono-num focus:outline-none focus:border-emerald-600"
+            placeholder="مثلاً: 1500000"
+            className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm font-bold font-mono-num focus:border-emerald-600"
             required
           />
           <div className="flex flex-wrap gap-1.5 mt-2">
@@ -351,46 +417,46 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
                 key={preset}
                 type="button"
                 onClick={() => setAmount(String(preset))}
-                className="px-2.5 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-[11px] font-mono-num font-semibold text-emerald-800"
+                className="h-8 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-mono-num font-semibold text-slate-700 transition-colors"
               >
-                +{formatToman(preset)}
+                {formatToman(preset)}
               </button>
             ))}
           </div>
         </div>
 
         <div>
-          <label className="block text-xs font-medium text-slate-700 mb-1.5">
-            توضیحات (شماره پیگیری، کارت به کارت، نقدی...)
+          <label className="block text-xs font-bold text-slate-700 mb-1.5">
+            توضیحات (کارت به کارت، نقدی، شماره پیگیری...)
           </label>
           <input
             type="text"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             placeholder="مثلاً: واریز به کارت بانک ملت"
-            className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-xs focus:outline-none focus:border-emerald-600"
+            className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-xs sm:text-sm focus:border-emerald-600"
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 pt-1">
           <button
             type="submit"
             disabled={submitting || !workerId || !amount}
-            className={`flex-1 min-h-[46px] rounded-xl text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-50 ${
+            className={`flex-1 min-h-[46px] rounded-xl text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 ${
               editingPaymentId !== null
-                ? 'bg-gradient-to-l from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-amber-600/20'
-                : 'bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 shadow-emerald-600/20'
+                ? 'bg-amber-600 hover:bg-amber-700'
+                : 'bg-emerald-700 hover:bg-emerald-800'
             }`}
           >
             {editingPaymentId !== null ? (
               <>
                 <Check className="w-4 h-4" />
-                <span>ذخیره تغییرات تراکنش</span>
+                <span>ذخیره تغییرات</span>
               </>
             ) : (
               <>
                 <Plus className="w-4 h-4" />
-                <span>ثبت در دیتابیس</span>
+                <span>ثبت تراکنش</span>
               </>
             )}
           </button>
@@ -399,7 +465,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
             <button
               type="button"
               onClick={handleCancelEdit}
-              className="w-fit min-h-[46px] px-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold"
+              className="min-h-[46px] px-4 rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold transition-colors"
             >
               انصراف
             </button>
@@ -408,18 +474,30 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
       </form>
 
       {/* Payments History List */}
-      <div className="lg:col-span-7 bg-white border border-emerald-100 rounded-3xl p-4 sm:p-5 space-y-4 shadow-xs">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-base font-bold text-slate-900">
-            لیست پرداختی‌ها و مساعده‌های «{activeProjectName}»
-          </h3>
+      <div
+        className={`${
+          mobileSection === 'list' ? 'block' : 'hidden lg:block'
+        } lg:col-span-7 bg-white border border-slate-200/90 rounded-2xl overflow-hidden`}
+      >
+        <div className="px-3.5 sm:px-5 py-3 sm:py-4 border-b border-slate-100 flex items-center justify-between gap-2.5">
+          <div className="min-w-0">
+            <h3 className="text-[13px] sm:text-base font-extrabold text-slate-900 truncate">
+              <span className="sm:hidden">تراکنش‌های مالی</span>
+              <span className="hidden sm:inline">تراکنش‌های مالی — {activeProjectName}</span>
+            </h3>
+            <p className="text-[11px] sm:text-xs text-slate-500 font-mono-num mt-0.5 truncate">
+              {toPersianDigits(filteredPayments.length)} رکورد ·{' '}
+              <strong className="text-slate-800">{formatToman(filteredTotal)} ت</strong>
+            </p>
+          </div>
 
-          <div className="flex items-center gap-1.5">
-            <Filter className="w-4 h-4 text-slate-400" />
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0 hidden sm:block" />
             <select
               value={filterWorkerId}
               onChange={(e) => setFilterWorkerId(e.target.value)}
-              className="h-9 px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs"
+              aria-label="فیلتر بر اساس کارگر"
+              className="h-9 px-2.5 sm:px-3 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 max-w-[135px] sm:max-w-none truncate"
             >
               <option value="all">همه کارگران</option>
               {workers.map((w) => (
@@ -432,81 +510,105 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
         </div>
 
         {filteredPayments.length === 0 ? (
-          <div className="py-12 text-center text-xs text-slate-500">
-            هیچ مساعده یا پرداختی ثبت نشده است.
+          <div className="py-12 px-4 text-center space-y-2.5">
+            <p className="text-xs sm:text-sm text-slate-500">
+              هیچ مساعده یا پرداختی در این بخش ثبت نشده است.
+            </p>
+            <button
+              type="button"
+              onClick={() => setMobileSection('form')}
+              className="lg:hidden h-9 px-4 rounded-xl bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>ثبت اولین تراکنش</span>
+            </button>
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
             {filteredPayments.map((p) => {
               const isBeingEdited = editingPaymentId === p.id;
+              const typeText =
+                p.payment_type === 'advance'
+                  ? 'مساعده'
+                  : p.payment_type === 'salary'
+                  ? 'تسویه'
+                  : 'کسر';
+              const amountColor =
+                p.payment_type === 'deduction'
+                  ? 'text-rose-700'
+                  : p.payment_type === 'salary'
+                  ? 'text-emerald-700'
+                  : 'text-amber-700';
+
               return (
                 <div
                   key={p.id}
-                  className={`py-3 flex items-center justify-between gap-3 px-2.5 rounded-xl transition-colors ${
-                    isBeingEdited
-                      ? 'bg-amber-50/90 border border-amber-200'
-                      : 'hover:bg-slate-50/70'
+                  className={`px-3.5 sm:px-5 py-3 sm:py-3.5 transition-colors ${
+                    isBeingEdited ? 'bg-amber-50/70' : 'hover:bg-slate-50/70'
                   }`}
                 >
-                  <div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-bold text-slate-900">{p.worker_name}</span>
-                      <span className="text-xs text-slate-500">
-                        ·{' '}
-                        {p.payment_type === 'advance'
-                          ? 'مساعده'
-                          : p.payment_type === 'salary'
-                          ? 'تسویه حقوق'
-                          : 'کسر / جریمه'}{' '}
-                        · {formatShamsiShort(p.payment_date)}
+                  {/* Top Line: Worker + Type (Right) | Amount (Left) */}
+                  <div className="flex items-baseline justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-[13px] sm:text-sm font-extrabold text-slate-900 truncate">
+                        {p.worker_name}
                       </span>
+                      <span className="text-[11px] text-slate-400 shrink-0">· {typeText}</span>
                       {isBeingEdited && (
-                        <span className="w-fit px-2 py-0.5 rounded-md bg-amber-200/80 text-amber-900 text-[10px] font-bold">
-                          در حال ویرایش
+                        <span className="text-[11px] font-bold text-amber-700 shrink-0">
+                          · ویرایش
                         </span>
                       )}
                     </div>
-                    {p.note && <p className="text-xs text-slate-500 mt-0.5">{p.note}</p>}
+
+                    <span
+                      className={`text-[13px] sm:text-sm font-extrabold font-mono-num shrink-0 ${amountColor}`}
+                    >
+                      {formatToman(p.amount)}{' '}
+                      <span className="text-[10px] sm:text-[11px] font-normal text-slate-400">
+                        <span className="sm:hidden">ت</span>
+                        <span className="hidden sm:inline">تومان</span>
+                      </span>
+                    </span>
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span
-                      className={`text-sm font-bold font-mono-num ml-1 ${
-                        p.payment_type === 'deduction'
-                          ? 'text-rose-700'
-                          : p.payment_type === 'salary'
-                          ? 'text-teal-800'
-                          : 'text-amber-700'
-                      }`}
-                    >
-                      {formatToman(p.amount)} ت
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleStartEdit(p)}
-                      title="ویرایش این تراکنش"
-                      className={`min-h-[36px] px-2.5 rounded-lg text-xs font-bold inline-flex items-center gap-1 transition-colors ${
-                        isBeingEdited
-                          ? 'bg-amber-500 text-white'
-                          : 'text-slate-600 bg-slate-100 hover:bg-amber-50 hover:text-amber-700'
-                      }`}
-                    >
-                      <Edit2 className="w-3.5 h-3.5" />
-                      <span>ویرایش</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (editingPaymentId === p.id) {
-                          handleCancelEdit();
-                        }
-                        onDeletePayment(p.id);
-                      }}
-                      title="حذف این تراکنش"
-                      className="min-h-[36px] min-w-[36px] rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                  {/* Bottom Line: Date + Note (Right) | Actions (Left) */}
+                  <div className="mt-1.5 flex items-center justify-between gap-2">
+                    <div className="min-w-0 text-[11px] text-slate-500 font-mono-num truncate">
+                      <span>{formatShamsiShort(p.payment_date)}</span>
+                      {p.note && <span className="font-sans"> · {p.note}</span>}
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleStartEdit(p)}
+                        title="ویرایش این تراکنش"
+                        aria-label="ویرایش این تراکنش"
+                        className={`h-8 sm:h-8.5 px-2.5 rounded-lg text-xs font-bold inline-flex items-center gap-1 transition-colors ${
+                          isBeingEdited
+                            ? 'bg-amber-600 text-white'
+                            : 'text-slate-600 bg-slate-100 hover:bg-slate-200'
+                        }`}
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">ویرایش</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (editingPaymentId === p.id) {
+                            handleCancelEdit();
+                          }
+                          onDeletePayment(p.id);
+                        }}
+                        title="حذف این تراکنش"
+                        aria-label="حذف این تراکنش"
+                        className="h-8 w-8 sm:h-8.5 sm:w-8.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center transition-colors"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -514,7 +616,7 @@ export const PaymentsView: React.FC<PaymentsViewProps> = ({
           </div>
         )}
       </div>
+      </div>
     </div>
   );
 };
-

@@ -10,6 +10,7 @@ import {
   Check,
   X,
   AlertTriangle,
+  Download,
 } from 'lucide-react';
 import { toPersianDigits } from '../utils/jalali';
 
@@ -44,11 +45,35 @@ export function getAuthHeaders(extra?: Record<string, string>): Record<string, s
   return headers;
 }
 
-export function withAuthQuery(url: string): string {
-  const token = getStoredAuthToken();
-  if (!token) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
+export async function downloadAuthenticatedFile(
+  url: string,
+  fallbackFilename: string
+): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: getAuthHeaders(),
+      credentials: 'same-origin',
+    });
+    if (!res.ok) return false;
+
+    const blob = await res.blob();
+    const disposition = res.headers.get('content-disposition') || '';
+    const match = /filename\*?=(?:UTF-8''|")?([^";\n]+)"?/i.exec(disposition);
+    const filename = match ? decodeURIComponent(match[1].trim()) : fallbackFilename;
+
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getPasswordStrength(password: string): {
@@ -94,8 +119,8 @@ function getPasswordStrength(password: string): {
   return {
     score: 4,
     label: 'بسیار امن',
-    colorClass: 'text-teal-700',
-    barClass: 'bg-gradient-to-l from-emerald-500 to-teal-600 w-full',
+    colorClass: 'text-emerald-700',
+    barClass: 'bg-emerald-600 w-full',
   };
 }
 
@@ -176,31 +201,34 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-4 text-slate-900">
-      <div className="w-full max-w-md bg-white/95 backdrop-blur-md border border-emerald-200/80 rounded-3xl p-6 sm:p-7 shadow-xl shadow-emerald-950/5 space-y-5">
-        {/* Header */}
-        <div className="text-center space-y-2">
-          <div className="w-13 h-13 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white flex items-center justify-center mx-auto shadow-md shadow-emerald-600/25">
-            {isSetup ? <Lock className="w-6 h-6" /> : <ShieldCheck className="w-6 h-6" />}
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4 sm:p-6 text-slate-900">
+      <div className="w-full max-w-[420px] bg-white border border-slate-200/90 rounded-3xl p-6 sm:p-8 shadow-sm space-y-6">
+        {/* Brand & Heading */}
+        <div className="text-center space-y-2.5">
+          <div className="w-12 h-12 rounded-2xl bg-emerald-700 text-white flex items-center justify-center mx-auto">
+            {isSetup ? <Lock className="w-5 h-5" /> : <ShieldCheck className="w-5 h-5" />}
           </div>
-          <h1 className="text-lg sm:text-xl font-extrabold text-slate-900">
-            {isSetup ? 'ورود امن به کارکردیار' : 'تعریف نام کاربری و رمز عبور اولیه'}
-          </h1>
-          <p className="text-xs text-slate-500 leading-relaxed">
+          <div>
+            <p className="text-xs font-bold text-emerald-700 tracking-tight mb-1">کارکردیار</p>
+            <h1 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight">
+              {isSetup ? 'ورود به سامانه مدیریت کارکرد' : 'تنظیم حساب مدیر سامانه'}
+            </h1>
+          </div>
+          <p className="text-xs text-slate-500 leading-relaxed max-w-xs mx-auto">
             {isSetup
-              ? 'برای دسترسی به اطلاعات پروژه‌ها، کارگران و حساب‌های مالی وارد شوید.'
-              : 'برای محافظت از اطلاعات برنامه، یک نام کاربری و رمز عبور قوی تعریف کنید. این مشخصات به صورت رمزنگاری‌شده در دیتابیس امن سرور ذخیره می‌شود.'}
+              ? 'برای دسترسی به پروژه‌ها، حضور روزانه و حساب‌های مالی وارد شوید.'
+              : 'یک نام کاربری و رمز عبور مطمئن تعریف کنید تا اطلاعات دیتابیس محافظت شود.'}
           </p>
         </div>
 
         {errorMsg && (
-          <div className="p-3 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-start gap-2">
+          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
             <div className="space-y-1">
               <p>{errorMsg}</p>
               {lockedSeconds > 0 && (
                 <p className="text-[11px] text-rose-600 font-mono-num">
-                  زمان باقی‌مانده تا رفع مسدودیت: {toPersianDigits(Math.floor(lockedSeconds / 60))}:
+                  زمان باقی‌مانده: {toPersianDigits(Math.floor(lockedSeconds / 60))}:
                   {toPersianDigits(String(lockedSeconds % 60).padStart(2, '0'))}
                 </p>
               )}
@@ -210,7 +238,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-extrabold text-slate-700 mb-1.5">
+            <label className="block text-xs font-bold text-slate-700 mb-1.5">
               نام کاربری
             </label>
             <div className="relative">
@@ -221,15 +249,15 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
                 autoComplete="username"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder={isSetup ? 'نام کاربری خود را وارد کنید' : 'مثلاً: admin یا نام دلخواه'}
-                className="w-full h-11 pr-10 pl-3.5 rounded-xl border border-slate-300 bg-slate-50/70 focus:bg-white text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-600 text-right"
+                placeholder={isSetup ? 'نام کاربری' : 'مثلاً: admin'}
+                className="w-full h-11 pr-10 pl-3.5 rounded-xl border border-slate-300 bg-slate-50/50 focus:bg-white text-sm font-medium text-slate-900 focus:border-emerald-600 transition-colors text-right"
                 required
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-extrabold text-slate-700 mb-1.5">
+            <label className="block text-xs font-bold text-slate-700 mb-1.5">
               رمز عبور
             </label>
             <div className="relative">
@@ -241,24 +269,25 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="حداقل ۶ کاراکتر"
-                className="w-full h-11 pr-10 pl-10 rounded-xl border border-slate-300 bg-slate-50/70 focus:bg-white text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-600 text-right"
+                className="w-full h-11 pr-10 pl-11 rounded-xl border border-slate-300 bg-slate-50/50 focus:bg-white text-sm font-medium text-slate-900 focus:border-emerald-600 transition-colors text-right"
                 required
               />
               <button
                 type="button"
                 onClick={() => setShowPassword((prev) => !prev)}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-1"
+                className="absolute left-1.5 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center transition-colors"
                 title={showPassword ? 'مخفی کردن رمز' : 'نمایش رمز'}
+                aria-label={showPassword ? 'مخفی کردن رمز' : 'نمایش رمز'}
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
 
             {!isSetup && password.length > 0 && (
-              <div className="mt-2 space-y-1">
+              <div className="mt-2 space-y-1.5">
                 <div className="flex items-center justify-between text-[11px]">
-                  <span className="text-slate-500">امنیت رمز عبور:</span>
-                  <span className={`font-extrabold ${strength.colorClass}`}>{strength.label}</span>
+                  <span className="text-slate-500">قدرت رمز عبور</span>
+                  <span className={`font-bold ${strength.colorClass}`}>{strength.label}</span>
                 </div>
                 <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                   <div className={`h-full transition-all duration-300 ${strength.barClass}`} />
@@ -269,7 +298,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
 
           {!isSetup && (
             <div>
-              <label className="block text-xs font-extrabold text-slate-700 mb-1.5">
+              <label className="block text-xs font-bold text-slate-700 mb-1.5">
                 تکرار رمز عبور
               </label>
               <div className="relative">
@@ -281,7 +310,7 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   placeholder="تکرار رمز عبور"
-                  className="w-full h-11 pr-10 pl-3.5 rounded-xl border border-slate-300 bg-slate-50/70 focus:bg-white text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-600 text-right"
+                  className="w-full h-11 pr-10 pl-3.5 rounded-xl border border-slate-300 bg-slate-50/50 focus:bg-white text-sm font-medium text-slate-900 focus:border-emerald-600 transition-colors text-right"
                   required
                 />
               </div>
@@ -289,12 +318,12 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
           )}
 
           <div className="flex items-center justify-between pt-0.5">
-            <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
+            <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none min-h-[36px]">
               <input
                 type="checkbox"
                 checked={rememberMe}
                 onChange={(e) => setRememberMe(e.target.checked)}
-                className="w-4 h-4 rounded accent-emerald-600"
+                className="w-4 h-4 rounded accent-emerald-700 cursor-pointer"
               />
               <span>مرا به خاطر بسپار ({toPersianDigits(30)} روز)</span>
             </label>
@@ -303,22 +332,21 @@ export const AuthView: React.FC<AuthViewProps> = ({ isSetup, onAuthenticated }) 
           <button
             type="submit"
             disabled={submitting || lockedSeconds > 0}
-            className="w-full h-11 rounded-xl bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 disabled:opacity-50 text-white text-xs sm:text-sm font-extrabold flex items-center justify-center gap-2 shadow-md shadow-emerald-600/20 transition-all"
+            className="w-full h-12 rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.99] disabled:opacity-50 text-white text-sm font-bold flex items-center justify-center gap-2 transition-all"
           >
             <ShieldCheck className="w-4 h-4" />
             <span>
               {submitting
-                ? 'در حال بررسی امنیتی...'
+                ? 'در حال بررسی...'
                 : isSetup
-                ? 'ورود به برنامه'
-                : 'ثبت نام کاربری و رمز عبور و ورود'}
+                ? 'ورود به سامانه'
+                : 'ذخیره و ورود به سامانه'}
             </span>
           </button>
         </form>
 
-        <div className="pt-3 border-t border-slate-100 text-[11px] text-slate-400 text-center flex items-center justify-center gap-1.5">
-          <Lock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-          <span>رمزنگاری سطح بالا با الگوریتم scrypt + Salt و قفل خودکار ضد نفوذ</span>
+        <div className="pt-4 border-t border-slate-100 text-[11px] text-slate-400 text-center">
+          محافظت‌شده با رمزنگاری scrypt و قفل خودکار ضد نفوذ
         </div>
       </div>
     </div>
@@ -330,6 +358,7 @@ interface SecurityModalProps {
   onClose: () => void;
   onCredentialsChanged: (newUsername: string, newToken: string) => void;
   onLogout: () => void;
+  onDownloadSqliteBackup?: () => Promise<void>;
 }
 
 export const SecurityModal: React.FC<SecurityModalProps> = ({
@@ -337,6 +366,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
   onClose,
   onCredentialsChanged,
   onLogout,
+  onDownloadSqliteBackup,
 }) => {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newUsername, setNewUsername] = useState(currentUsername);
@@ -344,6 +374,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [downloadingBackup, setDownloadingBackup] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -404,150 +435,174 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
       onClick={onClose}
     >
       <div
-        className="bg-white border border-emerald-100 rounded-2xl max-w-md w-full p-4 sm:p-5 space-y-4 shadow-2xl"
+        className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-5 h-5 text-emerald-600" />
-            <div>
-              <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
-                تنظیمات امنیتی و رمز ورود
-              </h3>
-              <p className="text-[11px] text-slate-500">
-                کاربر فعال: <strong className="text-emerald-700">{currentUsername}</strong>
-              </p>
-            </div>
+        {/* Mobile Sheet Grab Handle */}
+        <div className="sm:hidden pt-2.5 pb-1 flex justify-center shrink-0">
+          <span className="w-10 h-1 rounded-full bg-slate-300" />
+        </div>
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 shrink-0">
+          <div>
+            <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+              حساب کاربری و امنیت
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              کاربر فعال: <strong className="text-slate-800">{currentUsername}</strong>
+            </p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="w-8 h-8 rounded-lg border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100"
+            aria-label="بستن"
+            className="w-10 h-10 sm:w-9 sm:h-9 rounded-xl border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100 hover:text-slate-800 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        {errorMsg && (
-          <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold">
-            {errorMsg}
-          </div>
-        )}
-
-        {successMsg && (
-          <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold">
-            {successMsg}
-          </div>
-        )}
-
-        <form onSubmit={handleSave} className="space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              رمز عبور فعلی *
-            </label>
-            <input
-              type={showPass ? 'text' : 'password'}
-              dir="ltr"
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              placeholder="رمز عبور فعلی خود را وارد کنید"
-              className="w-full h-9 px-3 rounded-xl border border-slate-300 text-xs text-right focus:outline-none focus:border-emerald-600"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1">
-              نام کاربری جدید *
-            </label>
-            <input
-              type="text"
-              dir="ltr"
-              value={newUsername}
-              onChange={(e) => setNewUsername(e.target.value)}
-              placeholder="نام کاربری جدید"
-              className="w-full h-9 px-3 rounded-xl border border-slate-300 text-xs font-bold text-right focus:outline-none focus:border-emerald-600"
-              required
-            />
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                رمز عبور جدید *
-              </label>
-              <input
-                type={showPass ? 'text' : 'password'}
-                dir="ltr"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                placeholder="حداقل ۶ کاراکتر"
-                className="w-full h-9 px-3 rounded-xl border border-slate-300 text-xs text-right focus:outline-none focus:border-emerald-600"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                تکرار رمز عبور جدید *
-              </label>
-              <input
-                type={showPass ? 'text' : 'password'}
-                dir="ltr"
-                value={confirmNewPassword}
-                onChange={(e) => setConfirmNewPassword(e.target.value)}
-                placeholder="تکرار رمز جدید"
-                className="w-full h-9 px-3 rounded-xl border border-slate-300 text-xs text-right focus:outline-none focus:border-emerald-600"
-                required
-              />
-            </div>
-          </div>
-
-          {newPassword.length > 0 && (
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-slate-500">قدرت رمز جدید:</span>
-              <span className={`font-extrabold ${strength.colorClass}`}>{strength.label}</span>
+        {/* Scrollable Body */}
+        <div className="p-5 space-y-4 overflow-y-auto">
+          {errorMsg && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold">
+              {errorMsg}
             </div>
           )}
 
-          <div className="flex items-center justify-between pt-1">
-            <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer">
+          {successMsg && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
+              {successMsg}
+            </div>
+          )}
+
+          <form onSubmit={handleSave} className="space-y-3.5">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                رمز عبور فعلی
+              </label>
               <input
-                type="checkbox"
-                checked={showPass}
-                onChange={(e) => setShowPass(e.target.checked)}
-                className="rounded accent-emerald-600"
+                type={showPass ? 'text' : 'password'}
+                dir="ltr"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder="رمز عبور فعلی خود را وارد کنید"
+                className="w-full h-11 sm:h-10 px-3.5 rounded-xl border border-slate-300 text-sm text-right focus:border-emerald-600"
+                required
               />
-              <span>نمایش رمزها</span>
-            </label>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                نام کاربری جدید
+              </label>
+              <input
+                type="text"
+                dir="ltr"
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+                placeholder="نام کاربری جدید"
+                className="w-full h-11 sm:h-10 px-3.5 rounded-xl border border-slate-300 text-sm font-semibold text-right focus:border-emerald-600"
+                required
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  رمز عبور جدید
+                </label>
+                <input
+                  type={showPass ? 'text' : 'password'}
+                  dir="ltr"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="حداقل ۶ کاراکتر"
+                  className="w-full h-11 sm:h-10 px-3.5 rounded-xl border border-slate-300 text-sm text-right focus:border-emerald-600"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  تکرار رمز جدید
+                </label>
+                <input
+                  type={showPass ? 'text' : 'password'}
+                  dir="ltr"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                  placeholder="تکرار رمز جدید"
+                  className="w-full h-11 sm:h-10 px-3.5 rounded-xl border border-slate-300 text-sm text-right focus:border-emerald-600"
+                  required
+                />
+              </div>
+            </div>
+
+            {newPassword.length > 0 && (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-slate-500">قدرت رمز جدید</span>
+                <span className={`font-bold ${strength.colorClass}`}>{strength.label}</span>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer min-h-[36px]">
+                <input
+                  type="checkbox"
+                  checked={showPass}
+                  onChange={(e) => setShowPass(e.target.checked)}
+                  className="w-4 h-4 rounded accent-emerald-700 cursor-pointer"
+                />
+                <span>نمایش رمزها</span>
+              </label>
+
+              <button
+                type="submit"
+                disabled={saving}
+                className="h-11 sm:h-10 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              >
+                <Check className="w-4 h-4" />
+                <span>{saving ? 'در حال ذخیره...' : 'ذخیره اطلاعات جدید'}</span>
+              </button>
+            </div>
+          </form>
+
+          {/* Quick Actions Footer: Backup & Logout */}
+          <div className="pt-4 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2.5">
+            {onDownloadSqliteBackup && (
+              <button
+                type="button"
+                disabled={downloadingBackup}
+                onClick={async () => {
+                  setDownloadingBackup(true);
+                  try {
+                    await onDownloadSqliteBackup();
+                  } finally {
+                    setDownloadingBackup(false);
+                  }
+                }}
+                className="h-10 px-3.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
+              >
+                <Download className="w-3.5 h-3.5 text-emerald-700" />
+                <span>{downloadingBackup ? 'در حال دانلود...' : 'پشتیبان SQLite'}</span>
+              </button>
+            )}
 
             <button
-              type="submit"
-              disabled={saving}
-              className="w-fit h-9 px-4 rounded-xl bg-gradient-to-l from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs"
+              type="button"
+              onClick={onLogout}
+              className="h-10 px-3.5 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-bold inline-flex items-center gap-1.5 transition-colors mr-auto"
             >
-              <Check className="w-3.5 h-3.5" />
-              <span>{saving ? 'در حال ذخیره...' : 'ذخیره نام کاربری و رمز جدید'}</span>
+              <LogOut className="w-3.5 h-3.5" />
+              <span>خروج از حساب</span>
             </button>
           </div>
-        </form>
-
-        <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-          <span className="text-[11px] text-slate-500">
-            قفل کردن برنامه و خروج از حساب فعلی:
-          </span>
-          <button
-            type="button"
-            onClick={onLogout}
-            className="w-fit h-8 px-3 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>خروج از برنامه</span>
-          </button>
         </div>
       </div>
     </div>

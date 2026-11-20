@@ -128,12 +128,12 @@ export interface BootstrapResponse {
   todayIso: string;
   projects: Project[];
   workers: Worker[];
-  dailyLogs: DailyLog[];
+  dailyLogs?: DailyLog[];
   allLogs: DailyLog[];
-  monthLogs: DailyLog[];
-  summaries: WorkerMonthlySummary[];
-  accruedSummaries: AccruedToTodaySummary[];
-  payments: PaymentRecord[];
+  monthLogs?: DailyLog[];
+  summaries?: WorkerMonthlySummary[];
+  accruedSummaries?: AccruedToTodaySummary[];
+  payments?: PaymentRecord[];
   allPayments: PaymentRecord[];
   dbFileSizeKb: number;
 }
