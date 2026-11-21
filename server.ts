@@ -224,15 +224,6 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE
   );
-
-  CREATE INDEX IF NOT EXISTS idx_workers_project ON workers(project_id, active);
-  CREATE INDEX IF NOT EXISTS idx_daily_logs_date ON daily_logs(work_date);
-  CREATE INDEX IF NOT EXISTS idx_daily_logs_worker_ym ON daily_logs(worker_id, shamsi_year, shamsi_month);
-  CREATE INDEX IF NOT EXISTS idx_payments_project_date ON payments(project_id, payment_date);
-  CREATE INDEX IF NOT EXISTS idx_payments_worker ON payments(worker_id, period_archived);
-  CREATE INDEX IF NOT EXISTS idx_wage_history_worker ON wage_history(worker_id, effective_date);
-  CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
 `);
 
 function migrateColumns() {
@@ -287,6 +278,17 @@ function migrateColumns() {
 }
 
 migrateColumns();
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_workers_project ON workers(project_id, active);
+  CREATE INDEX IF NOT EXISTS idx_daily_logs_date ON daily_logs(work_date);
+  CREATE INDEX IF NOT EXISTS idx_daily_logs_worker_ym ON daily_logs(worker_id, shamsi_year, shamsi_month);
+  CREATE INDEX IF NOT EXISTS idx_payments_project_date ON payments(project_id, payment_date);
+  CREATE INDEX IF NOT EXISTS idx_payments_worker ON payments(worker_id, period_archived);
+  CREATE INDEX IF NOT EXISTS idx_wage_history_worker ON wage_history(worker_id, effective_date);
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at);
+`);
 
 function seedIfEmpty() {
   const metaRow = db
