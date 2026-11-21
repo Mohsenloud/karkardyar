@@ -1,0 +1,54 @@
+# نمونه پیکربندی Nginx برای اجرای کارکردیار روی VPS با دامنه و HTTPS (Certbot)
+# مسیر پیشنهادی روی سرور اوبونتو: /etc/nginx/sites-available/karkardyar
+# پس از جایگزینی your-domain.com، دستور زیر را اجرا کنید:
+#   sudo ln -s /etc/nginx/sites-available/karkardyar /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#   sudo certbot --nginx -d your-domain.com
+#
+# نکته مهم: هنگام استفاده از Nginx، در فایل .env مقادیر زیر را تنظیم کنید:
+#   BIND_HOST=127.0.0.1
+#   TRUST_PROXY=true
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name your-domain.com;
+
+    # اجازه آپلود عکس رسید و فایل پشتیبان JSON/SQLite تا ۲۰ مگابایت
+    client_max_body_size 20M;
+
+    # فشرده‌سازی پاسخ‌ها
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml application/manifest+json;
+
+    # کش طولانی برای فایل‌های استاتیک هش‌شده Vite
+    location /assets/ {
+        proxy_pass http://127.0.0.1:3080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # بدون کش برای فایل‌های PWA تا آپدیت‌ها بلافاصله روی موبایل اعمال شوند
+    location ~* ^/(sw\.js|registerSW\.js|manifest\.webmanifest)$ {
+        proxy_pass http://127.0.0.1:3080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        add_header Cache-Control "no-cache, must-revalidate";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:3080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_read_timeout 90s;
+        proxy_connect_timeout 30s;
+    }
+}

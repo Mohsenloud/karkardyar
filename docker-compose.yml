@@ -1,10 +1,14 @@
 services:
   karkardyar:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: karkardyar-app
     restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
     ports:
-      - "${APP_PORT:-3080}:3000"
+      - "${BIND_HOST:-0.0.0.0}:${APP_PORT:-3080}:3000"
     volumes:
       - ../karkardyar-data:/app/data
       - ./data:/app/legacy_data
@@ -14,7 +18,26 @@ services:
       - TZ=Asia/Tehran
       - DATA_DIR=/app/data
       - LEGACY_DATA_DIR=/app/legacy_data
+      - APP_URL=${APP_URL:-}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - TRUST_PROXY=${TRUST_PROXY:-false}
-
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -4,7 +4,6 @@ set -euo pipefail
 # قرار دادن کل اسکریپت در تابع main باعث می‌شود bash قبل از اجرا کل فایل را در حافظه بخواند
 # و اگر git pull خود فایل deploy.sh را آپدیت کند هیچ اختلالی در ادامه اجرا رخ ندهد.
 main() {
-  # همیشه از پوشه خود اسکریپت اجرا شود (حتی اگر از مسیر دیگری فراخوانی شد)
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   cd "$SCRIPT_DIR"
 
@@ -23,7 +22,6 @@ main() {
   }
   trap cleanup EXIT
 
-  # تشخیص دستور Docker Compose (نسخه جدید یا قدیمی)
   if docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD=(docker compose)
   elif command -v docker-compose >/dev/null 2>&1; then
@@ -38,6 +36,12 @@ main() {
     exit 1
   fi
 
+  # بررسی فضای خالی دیسک VPS (هشدار در صورت کمتر از ۱ گیگابایت)
+  FREE_KB="$(df -Pk "$SCRIPT_DIR" | awk 'NR==2 {print $4}' || echo "0")"
+  if [ -n "$FREE_KB" ] && [ "$FREE_KB" -lt 1048576 ] 2>/dev/null; then
+    echo "⚠️ هشدار: فضای خالی دیسک سرور کمتر از ۱ گیگابایت است (حدود $((FREE_KB / 1024))MB)."
+  fi
+
   # خواندن پورت برنامه از .env (در صورت وجود) یا پیش‌فرض 3080
   APP_PORT="3080"
   if [ -f ".env" ]; then
@@ -45,21 +49,26 @@ main() {
     if [ -n "$ENV_PORT" ]; then
       APP_PORT="$ENV_PORT"
     fi
+  else
+    echo "ℹ️ فایل .env یافت نشد؛ از تنظیمات پیش‌فرض (پورت $APP_PORT) استفاده می‌شود."
+    echo "   برای تنظیم دامنه، Nginx یا بکاپ تلگرام می‌توانید .env.example را به .env کپی کنید."
   fi
 
-  mkdir -p "$PERSISTENT_DATA_DIR" "$BACKUP_DIR" "$LEGACY_DATA_DIR"
+  mkdir -p "$PERSISTENT_DATA_DIR/receipts" "$PERSISTENT_DATA_DIR/auto-backups" "$BACKUP_DIR" "$LEGACY_DATA_DIR"
   TMP_GUARD_DIR="$(mktemp -d)"
   chmod 700 "$TMP_GUARD_DIR"
 
   echo "=================================================="
-  echo "🚀 شروع بروزرسانی امن کارکردیار ($TIMESTAMP)"
+  echo "🚀 شروع استقرار و بروزرسانی امن کارکردیار ($TIMESTAMP)"
   echo "=================================================="
 
-  echo "[1/6] 🛡️ بررسی و انتقال دیتابیس‌های قبلی..."
-  # اگر دیتابیس از نسخه قدیمی در ./data وجود دارد و در پوشه بیرونی نیست، منتقل کن
+  echo "[1/6] 🛡️ بررسی و انتقال دیتابیس و رسیدهای قبلی..."
   if [ -f "$LEGACY_DATA_DIR/karkard.sqlite" ] && [ ! -f "$PERSISTENT_DATA_DIR/karkard.sqlite" ]; then
-    echo "   📦 انتقال دیتابیس فعلی به پوشه امن ($PERSISTENT_DATA_DIR)..."
+    echo "   📦 انتقال دیتابیس فعلی به پوشه دائمی ($PERSISTENT_DATA_DIR)..."
     cp -f "$LEGACY_DATA_DIR"/karkard.sqlite* "$PERSISTENT_DATA_DIR"/ 2>/dev/null || true
+  fi
+  if [ -d "$LEGACY_DATA_DIR/receipts" ] && [ -n "$(ls -A "$LEGACY_DATA_DIR/receipts" 2>/dev/null || true)" ]; then
+    cp -rn "$LEGACY_DATA_DIR/receipts/." "$PERSISTENT_DATA_DIR/receipts/" 2>/dev/null || true
   fi
 
   echo "[2/6] 🔄 ادغام فایل‌های WAL و تهیه نسخه پشتیبان خودکار..."
@@ -74,21 +83,19 @@ main() {
     BACKUP_FILE="$BACKUP_DIR/karkard-pre-update-$TIMESTAMP.sqlite"
     cp -f "$PERSISTENT_DATA_DIR/karkard.sqlite" "$BACKUP_FILE"
     cp -f "$PERSISTENT_DATA_DIR"/karkard.sqlite* "$TMP_GUARD_DIR"/ 2>/dev/null || true
-    echo "   ✅ بکاپ خودکار ذخیره شد: $BACKUP_FILE"
+    echo "   ✅ بکاپ خودکار دیتابیس ذخیره شد: $BACKUP_FILE"
 
-    # نگهداری حداکثر MAX_BACKUPS نسخه پشتیبان اخیر برای جلوگیری از پر شدن دیسک
     OLD_BACKUPS="$(ls -1t "$BACKUP_DIR"/karkard-pre-update-*.sqlite 2>/dev/null | tail -n +$((MAX_BACKUPS + 1)) || true)"
     if [ -n "$OLD_BACKUPS" ]; then
       echo "$OLD_BACKUPS" | xargs -r rm -f
     fi
   else
-    echo "   ℹ️ فایل دیتابیس قبلی یافت نشد (احتمالاً اولین نصب روی سرور است)."
+    echo "   ℹ️ فایل دیتابیس قبلی یافت نشد (اولین نصب روی سرور)."
   fi
 
   echo "[3/6] 📥 دریافت آخرین تغییرات کد از گیت..."
-  # جلوگیری همیشگی از خطای تداخل chmod +x روی deploy.sh یا پوشه legacy data
   git config core.fileMode false 2>/dev/null || true
-  git checkout -- "$LEGACY_DATA_DIR" deploy.sh 2>/dev/null || true
+  git checkout -- "$LEGACY_DATA_DIR" deploy.sh Dockerfile 2>/dev/null || true
 
   CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
   if ! git pull --ff-only origin "$CURRENT_BRANCH"; then
@@ -97,18 +104,17 @@ main() {
   fi
   chmod +x "$SCRIPT_DIR/deploy.sh" 2>/dev/null || true
 
-  # اطمینان از سالم ماندن دیتابیس در پوشه بیرونی پس از آپدیت گیت
   if [ -f "$TMP_GUARD_DIR/karkard.sqlite" ] && [ ! -s "$PERSISTENT_DATA_DIR/karkard.sqlite" ]; then
     echo "   🔁 بازیابی فایل دیتابیس از نسخه محافظتی..."
     cp -f "$TMP_GUARD_DIR"/karkard.sqlite* "$PERSISTENT_DATA_DIR"/ 2>/dev/null || true
   fi
 
-  echo "[4/6] 🐳 ساخت ایمیج جدید و راه‌اندازی کانتینر..."
-  "${COMPOSE_CMD[@]}" up -d --build --remove-orphans
+  echo "[4/6] 🐳 ساخت ایمیج بهینه چندمرحله‌ای و راه‌اندازی کانتینر..."
+  DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 "${COMPOSE_CMD[@]}" up -d --build --remove-orphans
 
-  echo "[5/6] 🩺 بررسی سلامت سرویس روی پورت $APP_PORT..."
+  echo "[5/6] 🩺 بررسی سلامت سرویس و دیتابیس روی پورت $APP_PORT..."
   HEALTH_OK=false
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 24); do
     if command -v curl >/dev/null 2>&1; then
       if curl -fsS "http://127.0.0.1:${APP_PORT}/api/health" >/dev/null 2>&1; then
         HEALTH_OK=true
@@ -126,22 +132,24 @@ main() {
   done
 
   if [ "$HEALTH_OK" != "true" ]; then
-    echo "❌ خطا: سرویس پس از ۳۰ ثانیه به /api/health پاسخ نداد."
+    echo "❌ خطا: سرویس پس از ۳۶ ثانیه به /api/health پاسخ نداد."
     echo "📋 آخرین لاگ‌های کانتینر:"
-    "${COMPOSE_CMD[@]}" logs --tail=40 "$SERVICE_NAME" || true
+    "${COMPOSE_CMD[@]}" logs --tail=50 "$SERVICE_NAME" || true
     if [ -n "$BACKUP_FILE" ]; then
       echo "🛡️ دیتابیس شما محفوظ است. فایل پشتیبان: $BACKUP_FILE"
     fi
     exit 1
   fi
 
-  echo "[6/6] 🧹 پاکسازی ایمیج‌های بلااستفاده داکر..."
+  echo "[6/6] 🧹 پاکسازی ایمیج‌ها و کش اضافی داکر برای حفظ فضای VPS..."
   docker image prune -f >/dev/null 2>&1 || true
+  docker builder prune -f --keep-storage=1GB >/dev/null 2>&1 || true
 
   echo "=================================================="
-  echo "✅ بروزرسانی با موفقیت کامل شد!"
+  echo "✅ استقرار و بروزرسانی با موفقیت کامل شد!"
   echo "🌐 آدرس محلی سرور: http://127.0.0.1:${APP_PORT}"
   echo "💾 مسیر دائمی دیتابیس: $(cd "$PERSISTENT_DATA_DIR" && pwd)/karkard.sqlite"
+  echo "🖼️ مسیر رسیدهای پرداخت: $(cd "$PERSISTENT_DATA_DIR" && pwd)/receipts"
   if [ -n "$BACKUP_FILE" ]; then
     echo "🗂️ آخرین بکاپ قبل از آپدیت: $BACKUP_FILE"
   fi

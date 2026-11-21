@@ -15,13 +15,21 @@ import {
   LayoutGrid,
   LayoutList,
   ExternalLink,
+  Lock,
+  Unlock,
+  Layers,
+  Share2,
+  MessageCircle,
+  Archive,
 } from 'lucide-react';
 import {
   AccruedToTodaySummary,
   AttendanceStatus,
   CalcMode,
   DailyLog,
+  LockedMonthRecord,
   PaymentRecord,
+  PaymentType,
   Worker,
 } from '../types';
 import {
@@ -43,6 +51,10 @@ import {
   downloadPayslipHtmlDocument,
   printPayslipDocument,
   openPayslipVectorInNewTab,
+  downloadBatchPayslipsPdf,
+  printBatchPayslips,
+  buildWhatsAppPayslipUrl,
+  sharePayslipSummary,
 } from '../utils/payslipExport';
 import { getProjectTheme } from '../utils/projectThemes';
 
@@ -57,10 +69,12 @@ const AVATAR_TONES = [
 interface MonthlySheetViewProps {
   activeProjectName?: string;
   activeProjectColor?: string;
+  selectedProjectId?: number | 'all';
   todayIso: string;
   workers: Worker[];
   accruedSummaries: AccruedToTodaySummary[];
   payments: PaymentRecord[];
+  lockedMonths?: LockedMonthRecord[];
   viewMode?: 'card' | 'row';
   onChangeViewMode?: (mode: 'card' | 'row') => void;
   onToggleAllDailyFridaysOff?: (enabled: boolean) => void;
@@ -87,26 +101,46 @@ interface MonthlySheetViewProps {
   onQuickSettleWorker: (
     worker: Worker,
     amount: number,
-    paymentType?: 'advance' | 'salary' | 'deduction',
+    paymentType?: PaymentType,
     note?: string,
     paymentDateIso?: string
   ) => void;
+  onToggleMonthLock?: (payload: {
+    project_id: number;
+    shamsi_year: number;
+    shamsi_month: number;
+    locked: boolean;
+    note?: string;
+  }) => Promise<void>;
+  onClosePeriod?: (payload: {
+    project_id: number | 'all';
+    next_start_date: string;
+    lock_current_month: boolean;
+    shamsi_year: number;
+    shamsi_month: number;
+  }) => Promise<void>;
+  onShowToast?: (msg: string) => void;
   onOpenWorkersTab?: () => void;
 }
 
 export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
   activeProjectName = 'همه پروژه‌ها',
   activeProjectColor = 'emerald',
+  selectedProjectId = 'all',
   todayIso,
   workers,
   accruedSummaries,
   payments,
+  lockedMonths = [],
   viewMode = 'card',
   onChangeViewMode,
   onToggleAllDailyFridaysOff,
   onSaveDailyLog,
   onSaveWorkerRangeAndDays,
   onQuickSettleWorker,
+  onToggleMonthLock,
+  onClosePeriod,
+  onShowToast,
   onOpenWorkersTab,
 }) => {
   const todayShamsi = isoToShamsi(todayIso);
@@ -132,18 +166,36 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
   const [payslipWorkerId, setPayslipWorkerId] = useState<number | null>(null);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState<boolean>(false);
+  const [isExportingBatch, setIsExportingBatch] = useState<boolean>(false);
   const [downloadFeedback, setDownloadFeedback] = useState<'pdf' | 'html' | null>(null);
+
+  // Period Close & Month Lock Modal
+  const [showPeriodModal, setShowPeriodModal] = useState<boolean>(false);
+  const [periodModalTab, setPeriodModalTab] = useState<'close' | 'lock'>('close');
+  const [lockJy, setLockJy] = useState<number>(todayShamsi.jy);
+  const [lockJm, setLockJm] = useState<number>(todayShamsi.jm);
+  const [closeNextJy, setCloseNextJy] = useState<number>(todayShamsi.jy);
+  const [closeNextJm, setCloseNextJm] = useState<number>(todayShamsi.jm);
+  const [closeNextJd, setCloseNextJd] = useState<number>(todayShamsi.jd);
+  const [lockCurrentOnClose, setLockCurrentOnClose] = useState<boolean>(true);
+  const [processingPeriodAction, setProcessingPeriodAction] = useState<boolean>(false);
 
   // Advance & Settlement Modal State
   const [settleModalWorkerId, setSettleModalWorkerId] = useState<number | null>(null);
-  const [settleType, setSettleType] = useState<'advance' | 'salary' | 'deduction'>('salary');
+  const [settleType, setSettleType] = useState<PaymentType>('salary');
   const [settleAmountInput, setSettleAmountInput] = useState<string>('');
   const [settleNoteInput, setSettleNoteInput] = useState<string>('');
   const [settleJy, setSettleJy] = useState<number>(todayShamsi.jy);
   const [settleJm, setSettleJm] = useState<number>(todayShamsi.jm);
   const [settleJd, setSettleJd] = useState<number>(todayShamsi.jd);
 
-  const yearOptions = getShamsiYearOptions(todayShamsi.jy, [startJy, endJy, settleJy]);
+  const yearOptions = getShamsiYearOptions(todayShamsi.jy, [
+    startJy,
+    endJy,
+    settleJy,
+    lockJy,
+    closeNextJy,
+  ]);
 
   const dailyWorkers = workers.filter((w) => w.wage_type === 'daily');
   const allDailyHaveFridaysOff =
@@ -346,7 +398,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       'ساعت اضافه‌کاری',
       'دستمزد پایه (تومان)',
       'مبلغ اضافه‌کاری (تومان)',
+      'مزایا (تومان)',
       'کسورات (تومان)',
+      'مانده دوره قبل (تومان)',
       'جمع کل کارکرد (تومان)',
       'مساعده و دریافتی (تومان)',
       'مانده قابل پرداخت (تومان)',
@@ -363,7 +417,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
         a?.effectiveOvertimeHours ?? 0,
         a?.baseEarnedToToday ?? 0,
         a?.overtimeEarnedToToday ?? 0,
-        a?.deductionsToToday ?? 0,
+        (a?.fixedAllowance ?? 0) + (a?.extraAllowancesToToday ?? 0),
+        (a?.fixedDeduction ?? 0) + (a?.deductionsToToday ?? 0),
+        a?.carryOverBalance ?? 0,
         a?.grossEarnedToToday ?? 0,
         a?.paidToToday ?? 0,
         a?.netPayableToToday ?? 0,
@@ -386,6 +442,50 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  const buildAllBatchItems = () =>
+    workers
+      .map((w) => {
+        const acc = accruedSummaries.find((a) => a.workerId === w.id);
+        if (!acc) return null;
+        return {
+          worker: w,
+          accrued: acc,
+          payments: payments.filter((p) => p.worker_id === w.id),
+          todayIso,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+
+  const handleDownloadBatchPdf = async () => {
+    const items = buildAllBatchItems();
+    if (items.length === 0) return;
+    setIsExportingBatch(true);
+    try {
+      const mode = await downloadBatchPayslipsPdf(items, activeProjectName, todayIso);
+      onShowToast?.(
+        mode === 'pdf'
+          ? `فیش یکجای ${toPersianDigits(items.length)} کارگر دانلود شد`
+          : 'فیش یکجا در قالب HTML ذخیره شد'
+      );
+    } finally {
+      setIsExportingBatch(false);
+    }
+  };
+
+  const handlePrintBatchPayslips = async () => {
+    const items = buildAllBatchItems();
+    if (items.length === 0) return;
+    await printBatchPayslips(items, activeProjectName);
+  };
+
+  const currentProjectIdNumeric = selectedProjectId === 'all' ? 0 : selectedProjectId;
+  const isTargetLockMonthLocked = lockedMonths.some(
+    (l) =>
+      l.shamsi_year === lockJy &&
+      l.shamsi_month === lockJm &&
+      (l.project_id === 0 || l.project_id === currentProjectIdNumeric)
+  );
+
   const totalDaysToTodayAll = accruedSummaries.reduce((s, x) => s + x.effectiveDaysToToday, 0);
   const totalGrossToTodayAll = accruedSummaries.reduce((s, x) => s + x.grossEarnedToToday, 0);
   const totalPaidToTodayAll = accruedSummaries.reduce((s, x) => s + x.paidToToday, 0);
@@ -406,8 +506,8 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
     acc: AccruedToTodaySummary,
     periodDates: ReturnType<typeof getIsoDatesBetween>
   ) => (
-    <div className="bg-slate-50/90 rounded-xl p-3 border border-slate-200/80 space-y-2.5">
-      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+    <div className="bg-zinc-50/90 rounded-xl p-3 ring-1 ring-zinc-950/5 space-y-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-600">
         <span>
           {worker.wage_type === 'daily' && worker.fridays_off
             ? 'جمعه‌ها تعطیل (نارنجی = ۰ روز) است؛ با لمس هر جمعه می‌توانید کارکرد آن را فعال کنید.'
@@ -429,15 +529,16 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
           const isFridayOffActive =
             isFriday && worker.wage_type === 'daily' && Boolean(worker.fridays_off);
 
-          let cellStyle = 'bg-emerald-700 text-white border-emerald-700';
+          let cellStyle = 'bg-emerald-600 text-white border-emerald-600 shadow-2xs';
           let subLabel = dItem.weekday;
 
           if (isFridayOffActive) {
             if (log?.status === 'present') {
-              cellStyle = 'bg-emerald-700 text-white border-emerald-700 ring-2 ring-amber-400';
+              cellStyle =
+                'bg-emerald-600 text-white border-emerald-600 ring-2 ring-amber-400 shadow-2xs';
               subLabel = 'جمعه ✓';
             } else if (log?.status === 'paid_leave') {
-              cellStyle = 'bg-sky-700 text-white border-sky-700';
+              cellStyle = 'bg-sky-600 text-white border-sky-600 shadow-2xs';
               subLabel = 'مرخصی';
             } else {
               cellStyle =
@@ -448,17 +549,17 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
             if (log?.status === 'absent') {
               cellStyle = 'bg-rose-50 text-rose-700 border-rose-300 line-through';
             } else if (log?.status === 'paid_leave') {
-              cellStyle = 'bg-sky-700 text-white border-sky-700';
+              cellStyle = 'bg-sky-600 text-white border-sky-600 shadow-2xs';
             } else if (isFutureDay && acc.calcMode === 'to_today') {
               cellStyle =
-                'bg-white text-slate-500 border-dashed border-slate-300 hover:bg-slate-100';
+                'bg-white text-zinc-500 border-dashed border-zinc-300 hover:bg-zinc-100';
             }
           }
 
           return (
             <React.Fragment key={dItem.iso}>
               {showMonthBadge && (
-                <span className="h-11 px-2.5 rounded-lg bg-slate-200/80 text-slate-800 text-[11px] font-bold inline-flex items-center justify-center shrink-0">
+                <span className="h-11 px-2.5 rounded-lg bg-zinc-200/80 text-zinc-800 text-[11px] font-bold inline-flex items-center justify-center shrink-0">
                   {dItem.monthName}
                 </span>
               )}
@@ -490,108 +591,220 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
   return (
     <div className="space-y-3 sm:space-y-4">
-      {/* Executive Project Financial Overview */}
+      {/* Catalyst Financial Stat Sheet */}
       <section
-        className={`${activeProjTheme.heroBanner} text-white rounded-2xl p-3.5 sm:p-5 transition-colors`}
+        className={`bg-white ring-1 shadow-2xs rounded-2xl overflow-hidden transition-colors ${
+          selectedProjectId === 'all' ? 'ring-zinc-950/10' : activeProjTheme.cardBorder
+        }`}
       >
-        {/* Mobile Compact Hero (< sm): Focal Net Payable + Hairline 3-Col Strip */}
+        {/* Mobile Financial Header (< sm) — Complete, Uncluttered, Zero Truncation */}
         <div className="sm:hidden">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <span className="text-[11px] text-white/75 block">
-                مانده قابل پرداخت · {toPersianDigits(workers.length)} نفر
+          <div
+            className={`px-3.5 py-3 space-y-2.5 border-b transition-colors ${
+              selectedProjectId === 'all'
+                ? 'bg-linear-to-l from-zinc-100 via-zinc-50/90 to-slate-50/60 border-zinc-200/80'
+                : activeProjTheme.headerTintBg
+            }`}
+          >
+            {/* Row 1: Project Title + Date & Headcount */}
+            <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${activeProjTheme.dotClass}`} />
+                <span className="text-xs font-extrabold text-zinc-950">
+                  تراز مالی «{activeProjectName}»
+                </span>
+              </div>
+              <span className="text-[11px] font-mono-num text-zinc-500">
+                تا {formatShamsiDayMonth(todayIso)} · {toPersianDigits(workers.length)} نفر
               </span>
-              <div className="text-xl font-extrabold text-white font-mono-num tracking-tight mt-0.5 truncate">
-                {formatToman(totalNetToTodayAll)}{' '}
-                <span className="text-xs font-normal text-white/75">تومان</span>
+            </div>
+
+            {/* Row 2: Hero Net Payable + Total Worked Days */}
+            <div className="flex flex-wrap items-end justify-between gap-x-3 gap-y-1.5 pt-0.5">
+              <div>
+                <span className="block text-[11px] font-semibold text-zinc-500">
+                  مانده قابل پرداخت
+                </span>
+                <div
+                  className={`text-xl font-extrabold font-mono-num tracking-tight mt-0.5 leading-snug ${activeProjTheme.accentText}`}
+                >
+                  {formatToman(totalNetToTodayAll)}{' '}
+                  <span className="text-xs font-medium text-zinc-500">تومان</span>
+                </div>
+              </div>
+
+              <div className="text-left">
+                <span className="block text-[10px] font-medium text-zinc-500">
+                  مجموع کارکرد
+                </span>
+                <span className="text-sm font-extrabold font-mono-num text-zinc-950 mt-0.5 block">
+                  {toPersianDigits(totalDaysToTodayAll)}{' '}
+                  <span className="text-[11px] font-normal text-zinc-500">روز</span>
+                </span>
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={handleExportCsv}
-              className="h-8.5 px-2.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-[11px] font-bold text-white inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>اکسل</span>
-            </button>
+            {/* Row 3: Clean Action Strip (Full Labels, Wraps Safely on Narrow Screens) */}
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              {workers.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={isExportingBatch}
+                    onClick={handleDownloadBatchPdf}
+                    className="flex-1 min-w-[78px] h-8 px-2 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-[11px] font-bold text-zinc-800 inline-flex items-center justify-center gap-1 whitespace-nowrap transition-colors disabled:opacity-50"
+                  >
+                    <Layers className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>{isExportingBatch ? 'در حال ساخت...' : 'فیش PDF'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePrintBatchPayslips}
+                    className="h-8 px-2.5 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-[11px] font-bold text-zinc-800 inline-flex items-center justify-center gap-1 whitespace-nowrap transition-colors"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <span>چاپ</span>
+                  </button>
+                </>
+              )}
+              {(onToggleMonthLock || onClosePeriod) && (
+                <button
+                  type="button"
+                  onClick={() => setShowPeriodModal(true)}
+                  className="flex-1 min-w-[78px] h-8 px-2 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-[11px] font-bold text-zinc-800 inline-flex items-center justify-center gap-1 whitespace-nowrap transition-colors"
+                >
+                  <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>قفل دوره</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                className="h-8 px-2.5 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-[11px] font-bold text-zinc-800 inline-flex items-center justify-center gap-1 whitespace-nowrap transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                <span>اکسل</span>
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-3 divide-x divide-x-reverse divide-white/15 pt-2.5 mt-2.5 border-t border-white/15 text-center font-mono-num">
-            <div className="px-1">
-              <span className="text-[10px] text-white/70 block">کارکرد</span>
-              <span className="text-xs font-extrabold text-white mt-0.5 block truncate">
-                {toPersianDigits(totalDaysToTodayAll)} روز
+          {/* Spacious 2-Column Financial Breakdown — Zero Truncation */}
+          <div className="grid grid-cols-2 divide-x divide-x-reverse divide-zinc-950/5 py-2.5 border-t border-zinc-950/5 font-mono-num bg-white">
+            <div className="px-3.5">
+              <span className="text-[11px] text-zinc-500 block">کل دستمزد کارکرد</span>
+              <span className="text-sm font-extrabold text-zinc-950 mt-0.5 block leading-snug">
+                {formatToman(totalGrossToTodayAll)}{' '}
+                <span className="text-[11px] font-normal text-zinc-500">تومان</span>
               </span>
             </div>
-            <div className="px-1">
-              <span className="text-[10px] text-white/70 block">کل دستمزد</span>
-              <span className="text-xs font-extrabold text-white mt-0.5 block truncate">
-                {formatToman(totalGrossToTodayAll)} ت
-              </span>
-            </div>
-            <div className="px-1">
-              <span className="text-[10px] text-amber-200 block">مساعده</span>
-              <span className="text-xs font-extrabold text-amber-300 mt-0.5 block truncate">
-                {formatToman(totalPaidToTodayAll)} ت
+            <div className="px-3.5">
+              <span className="text-[11px] text-amber-700 block">مساعده پرداختی</span>
+              <span className="text-sm font-extrabold text-amber-700 mt-0.5 block leading-snug">
+                {formatToman(totalPaidToTodayAll)}{' '}
+                <span className="text-[11px] font-normal text-amber-600/80">تومان</span>
               </span>
             </div>
           </div>
         </div>
 
-        {/* Desktop / Tablet Full Hero (sm:) */}
+        {/* Desktop / Tablet Catalyst Stat Sheet (sm:) */}
         <div className="hidden sm:block">
-          <div className="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-white/15">
-            <div>
-              <h2 className="text-base font-extrabold text-white tracking-tight">
-                کارکرد و تراز مالی «{activeProjectName}»
-              </h2>
-              <p className="text-xs text-white/75 mt-0.5 font-mono-num">
-                تا امروز {formatShamsiDayMonth(todayIso)} · {toPersianDigits(workers.length)} نفر
-              </p>
+          <div
+            className={`px-5 py-3.5 border-b flex flex-wrap items-center justify-between gap-3 transition-colors ${
+              selectedProjectId === 'all'
+                ? 'bg-linear-to-l from-zinc-100 via-zinc-50/90 to-slate-50/60 border-zinc-200/80'
+                : activeProjTheme.headerTintBg
+            }`}
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${activeProjTheme.dotClass}`} />
+              <div className="min-w-0">
+                <h2 className="text-sm font-extrabold text-zinc-950 tracking-tight truncate">
+                  تراز مالی «{activeProjectName}»
+                </h2>
+                <p className="text-xs text-zinc-500 font-mono-num mt-0.5">
+                  تا امروز {formatShamsiDayMonth(todayIso)} · {toPersianDigits(workers.length)} نفر
+                </p>
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={handleExportCsv}
-              className="h-9 px-3.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-bold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>خروجی اکسل</span>
-            </button>
+
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {workers.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    disabled={isExportingBatch}
+                    onClick={handleDownloadBatchPdf}
+                    className="h-9 px-3 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-xs font-bold text-zinc-800 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors disabled:opacity-50"
+                  >
+                    <Layers className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>{isExportingBatch ? 'در حال ساخت PDF...' : 'فیش یکجا PDF'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePrintBatchPayslips}
+                    title="چاپ یکجای فیش کل کارگران"
+                    className="h-9 w-9 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-zinc-700 inline-flex items-center justify-center transition-colors"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              )}
+
+              {(onToggleMonthLock || onClosePeriod) && (
+                <button
+                  type="button"
+                  onClick={() => setShowPeriodModal(true)}
+                  className="h-9 px-3 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-xs font-bold text-zinc-800 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                >
+                  <Archive className="w-3.5 h-3.5 text-amber-600" />
+                  <span>بستن دوره / قفل ماه</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={handleExportCsv}
+                className="h-9 px-3.5 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-xs font-bold text-zinc-800 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5 text-zinc-500" />
+                <span>خروجی اکسل</span>
+              </button>
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 pt-4 font-mono-num">
-            <div className="bg-white/10 rounded-xl px-3.5 py-2.5 border border-white/10">
-              <span className="text-[11px] text-white/75 block">مجموع روز کارکرد</span>
-              <span className="text-lg font-extrabold text-white mt-1 block">
+          <div className="grid grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 lg:divide-x lg:divide-x-reverse divide-zinc-950/5 font-mono-num bg-white">
+            <div className="px-5 py-4">
+              <span className="text-xs font-medium text-zinc-500 block">مجموع روز کارکرد</span>
+              <span className="text-xl font-extrabold text-zinc-950 tracking-tight mt-1.5 block">
                 {toPersianDigits(totalDaysToTodayAll)}{' '}
-                <span className="text-xs font-normal text-white/75">روز</span>
+                <span className="text-xs font-normal text-zinc-400">روز</span>
               </span>
             </div>
 
-            <div className="bg-white/10 rounded-xl px-3.5 py-2.5 border border-white/10">
-              <span className="text-[11px] text-white/75 block">کل دستمزد کارکرد</span>
-              <span className="text-lg font-extrabold text-white mt-1 block truncate">
+            <div className="px-5 py-4">
+              <span className="text-xs font-medium text-zinc-500 block">کل دستمزد کارکرد</span>
+              <span className="text-xl font-extrabold text-zinc-950 tracking-tight mt-1.5 block truncate">
                 {formatToman(totalGrossToTodayAll)}{' '}
-                <span className="text-xs font-normal text-white/75">ت</span>
+                <span className="text-xs font-normal text-zinc-400">ت</span>
               </span>
             </div>
 
-            <div className="bg-white/10 rounded-xl px-3.5 py-2.5 border border-white/10">
-              <span className="text-[11px] text-amber-200 block">مساعده پرداختی</span>
-              <span className="text-lg font-extrabold text-amber-300 mt-1 block truncate">
+            <div className="px-5 py-4 border-t lg:border-t-0 border-zinc-950/5">
+              <span className="text-xs font-medium text-amber-700 block">مساعده پرداختی</span>
+              <span className="text-xl font-extrabold text-amber-700 tracking-tight mt-1.5 block truncate">
                 {formatToman(totalPaidToTodayAll)}{' '}
-                <span className="text-xs font-normal text-amber-200/80">ت</span>
+                <span className="text-xs font-normal text-amber-600/70">ت</span>
               </span>
             </div>
 
-            <div className="bg-white text-slate-900 rounded-xl px-3.5 py-2.5">
-              <span className="text-[11px] text-slate-500 font-bold block">مانده قابل پرداخت</span>
+            <div className="px-5 py-4 border-t lg:border-t-0 border-zinc-950/5 bg-zinc-50/40">
+              <span className="text-xs font-bold text-zinc-600 block">مانده قابل پرداخت</span>
               <span
-                className={`text-lg font-extrabold mt-1 block truncate ${activeProjTheme.accentText}`}
+                className={`text-xl font-extrabold tracking-tight mt-1.5 block truncate ${activeProjTheme.accentText}`}
               >
                 {formatToman(totalNetToTodayAll)}{' '}
-                <span className="text-xs font-normal text-slate-500">تومان</span>
+                <span className="text-xs font-medium text-zinc-500">تومان</span>
               </span>
             </div>
           </div>
@@ -600,7 +813,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
       {/* Toolbar: Single-Row Friday Holiday Checkbox + Card/Row View Switcher */}
       {workers.length > 0 && (
-        <section className="bg-white border border-slate-200/90 rounded-xl sm:rounded-2xl px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2">
+        <section className="bg-zinc-50/80 ring-1 ring-zinc-950/5 rounded-xl px-3 sm:px-4 py-2 sm:py-2.5 flex items-center justify-between gap-2">
           {dailyWorkers.length > 0 ? (
             <label className="flex items-center gap-2 cursor-pointer select-none min-h-[34px] min-w-0">
               <input
@@ -610,35 +823,35 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   if (el) el.indeterminate = someDailyHaveFridaysOff;
                 }}
                 onChange={(e) => onToggleAllDailyFridaysOff?.(e.target.checked)}
-                className="w-4 h-4 rounded border-slate-300 accent-emerald-700 cursor-pointer shrink-0"
+                className="w-4 h-4 rounded border-zinc-300 accent-zinc-950 cursor-pointer shrink-0"
               />
               <div className="flex items-center gap-x-2 min-w-0 truncate">
-                <span className="text-xs sm:text-[13px] font-bold text-slate-900 truncate">
+                <span className="text-xs sm:text-[13px] font-bold text-zinc-950 truncate">
                   <span className="sm:hidden">جمعه‌ها تعطیل</span>
                   <span className="hidden sm:inline">تعطیلی جمعه‌ها (روزمزد)</span>
                 </span>
-                <span className="text-[11px] text-slate-500 hidden md:inline truncate">
+                <span className="text-[11px] text-zinc-500 hidden md:inline truncate">
                   · جمعه‌ها کسر می‌شود و از تقویم هر کارگر قابل تغییر است
                 </span>
               </div>
             </label>
           ) : (
-            <div className="text-xs font-semibold text-slate-500 truncate">
+            <div className="text-xs font-semibold text-zinc-500 truncate">
               {toPersianDigits(workers.length)} نفر
             </div>
           )}
 
-          {/* Segmented View Switcher (icon-only on mobile, icon+label on sm:) */}
-          <div className="flex items-center gap-0.5 bg-slate-100 p-1 rounded-xl shrink-0">
+          {/* Segmented View Switcher */}
+          <div className="flex items-center gap-0.5 bg-zinc-200/70 ring-1 ring-inset ring-zinc-950/5 p-0.5 rounded-lg shrink-0">
             <button
               type="button"
               onClick={() => onChangeViewMode?.('card')}
               title="نمای کارتی"
               aria-label="نمای کارتی"
-              className={`h-7 w-8 sm:h-8 sm:w-auto sm:px-3 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
+              className={`h-7 w-8 sm:h-7.5 sm:w-auto sm:px-2.5 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
                 viewMode === 'card'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-500 hover:text-slate-900'
+                  ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-950/5'
+                  : 'text-zinc-500 hover:text-zinc-950'
               }`}
             >
               <LayoutGrid className="w-3.5 h-3.5" />
@@ -649,10 +862,10 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               onClick={() => onChangeViewMode?.('row')}
               title="نمای ردیفی"
               aria-label="نمای ردیفی"
-              className={`h-7 w-8 sm:h-8 sm:w-auto sm:px-3 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
+              className={`h-7 w-8 sm:h-7.5 sm:w-auto sm:px-2.5 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
                 viewMode === 'row'
-                  ? 'bg-white text-slate-900 shadow-2xs'
-                  : 'text-slate-500 hover:text-slate-900'
+                  ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-950/5'
+                  : 'text-zinc-500 hover:text-zinc-950'
               }`}
             >
               <LayoutList className="w-3.5 h-3.5" />
@@ -664,17 +877,17 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
       {/* Empty State */}
       {workers.length === 0 ? (
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-8 text-center space-y-3">
-          <p className="text-sm font-bold text-slate-700">
+        <div className="bg-white ring-1 ring-zinc-950/10 shadow-2xs rounded-2xl p-8 text-center space-y-3">
+          <p className="text-sm font-bold text-zinc-700">
             هنوز هیچ کارگری در «{activeProjectName}» ثبت نشده است.
           </p>
           {onOpenWorkersTab && (
             <button
               type="button"
               onClick={onOpenWorkersTab}
-              className="h-10 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+              className="h-10 px-4 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white shadow-xs inset-ring inset-ring-white/10 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
             >
-              <Plus className="w-4 h-4" />
+              <Plus className="w-4 h-4 text-emerald-400" />
               <span>افزودن کارگر به «{activeProjectName}»</span>
             </button>
           )}
@@ -684,9 +897,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       {/* Worker List — Row Ledger View vs Card Grid View */}
       {workers.length > 0 &&
         (viewMode === 'row' ? (
-          <div className="bg-white border border-slate-200/90 rounded-2xl divide-y divide-slate-100 overflow-hidden">
+          <div className="bg-white ring-1 ring-zinc-950/10 shadow-2xs rounded-xl divide-y divide-zinc-950/5 overflow-hidden">
             {/* Desktop Column Header */}
-            <div className="hidden lg:grid lg:grid-cols-12 gap-3 px-4 py-2.5 bg-slate-50/90 text-[11px] font-bold text-slate-500">
+            <div className="hidden lg:grid lg:grid-cols-12 gap-3 px-4 py-2.5 bg-zinc-50/80 text-[11px] font-bold text-zinc-500">
               <div className="col-span-4">کارگر و تنظیمات</div>
               <div className="col-span-2 text-center">کارکرد</div>
               <div className="col-span-3 text-left pl-2">مانده قابل پرداخت</div>
@@ -704,28 +917,28 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 : [];
 
               return (
-                <div key={worker.id} className="transition-colors hover:bg-slate-50/60">
+                <div key={worker.id} className="transition-colors hover:bg-zinc-50/70">
                   <div className="px-3 sm:px-4 py-2.5 sm:py-3 flex flex-col lg:grid lg:grid-cols-12 lg:items-center gap-2 sm:gap-3">
                     {/* Col 1 (4 cols): Identity + Role + Friday-Off Toggle */}
                     <div className="lg:col-span-4 flex items-center justify-between lg:justify-start gap-2 min-w-0">
                       <div className="flex items-center gap-2.5 min-w-0">
                         <div
-                          className={`hidden sm:flex w-9 h-9 rounded-xl border ${avatarTone} font-extrabold text-xs items-center justify-center shrink-0`}
+                          className={`hidden sm:flex w-9 h-9 rounded-lg border ${avatarTone} font-extrabold text-xs items-center justify-center shrink-0`}
                         >
                           {worker.name.trim().charAt(0)}
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5 min-w-0">
-                            <h3 className="text-[13px] sm:text-sm font-extrabold text-slate-900 truncate">
+                            <h3 className="text-[13px] sm:text-sm font-extrabold text-zinc-950 truncate">
                               {worker.name}
                             </h3>
                             {worker.wage_type === 'daily' && (
                               <label
                                 title="تعطیل کردن جمعه‌ها برای این کارگر روزمزد"
-                                className={`h-5 sm:h-6 px-1.5 rounded-md border text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer select-none shrink-0 transition-colors ${
+                                className={`h-5 sm:h-6 px-1.5 rounded-md ring-1 ring-inset text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer select-none shrink-0 transition-colors ${
                                   worker.fridays_off
-                                    ? 'bg-amber-50 border-amber-200 text-amber-800'
-                                    : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-700'
+                                    ? 'bg-amber-50 ring-amber-600/20 text-amber-800'
+                                    : 'bg-zinc-50 ring-zinc-950/10 text-zinc-400 hover:text-zinc-700'
                                 }`}
                               >
                                 <input
@@ -738,7 +951,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                               </label>
                             )}
                           </div>
-                          <div className="text-[11px] text-slate-500 font-mono-num truncate">
+                          <div className="text-[11px] text-zinc-500 font-mono-num truncate">
                             {worker.role} · از {formatShamsiDayMonth(acc.startDate)}
                           </div>
                         </div>
@@ -748,7 +961,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       <div className="lg:hidden text-left font-mono-num shrink-0">
                         <span className="text-[13px] sm:text-sm font-extrabold text-emerald-700">
                           {formatToman(acc.netPayableToToday)}
-                          <span className="text-[10px] font-normal text-slate-400 mr-0.5">ت</span>
+                          <span className="text-[10px] font-normal text-zinc-400 mr-0.5">ت</span>
                         </span>
                       </div>
                     </div>
@@ -756,18 +969,18 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     {/* Mobile Bottom Bar / Desktop Cols 2-4 */}
                     <div className="lg:col-span-2 flex items-center justify-between lg:justify-center gap-1.5 sm:gap-2">
                       {/* Worked Days Stepper */}
-                      <div className="flex items-center gap-0.5 sm:gap-1 font-mono-num bg-slate-50 border border-slate-200 rounded-xl p-0.5 shrink-0">
+                      <div className="flex items-center gap-0.5 sm:gap-1 font-mono-num bg-zinc-50 ring-1 ring-zinc-950/10 rounded-lg p-0.5 shrink-0">
                         <button
                           type="button"
                           onClick={() => handleQuickAdjustWorkedDays(worker, acc, -1)}
                           title="کسر ۱ روز"
                           aria-label="کسر ۱ روز"
-                          className="w-7 h-7 rounded-lg hover:bg-rose-50 text-rose-600 flex items-center justify-center transition-colors"
+                          className="w-7 h-7 rounded-md hover:bg-rose-50 text-rose-600 flex items-center justify-center transition-colors"
                         >
                           <Minus className="w-3.5 h-3.5" />
                         </button>
 
-                        <span className="text-xs font-extrabold text-slate-900 px-1 min-w-[46px] sm:min-w-[54px] text-center whitespace-nowrap">
+                        <span className="text-xs font-extrabold text-zinc-950 px-1 min-w-[46px] sm:min-w-[54px] text-center whitespace-nowrap">
                           {toPersianDigits(acc.effectiveDaysToToday)} روز
                         </span>
 
@@ -788,7 +1001,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                           onClick={() => handleQuickAdjustWorkedDays(worker, acc, 1)}
                           title="افزودن ۱ روز"
                           aria-label="افزودن ۱ روز"
-                          className="w-7 h-7 rounded-lg hover:bg-emerald-50 text-emerald-700 flex items-center justify-center transition-colors"
+                          className="w-7 h-7 rounded-md hover:bg-emerald-50 text-emerald-700 flex items-center justify-center transition-colors"
                         >
                           <Plus className="w-3.5 h-3.5" />
                         </button>
@@ -805,8 +1018,8 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                           aria-label="تقویم روزها"
                           className={`w-8 h-8 rounded-lg inline-flex items-center justify-center transition-colors ${
                             isCalendarOpen
-                              ? 'bg-emerald-700 text-white'
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                              ? 'bg-zinc-950 text-white'
+                              : 'bg-white ring-1 ring-zinc-950/10 text-zinc-600 hover:bg-zinc-50'
                           }`}
                         >
                           <Calendar className="w-3.5 h-3.5" />
@@ -816,7 +1029,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                           onClick={() => openRangeAndDaysEditor(worker)}
                           title="تنظیم تاریخ"
                           aria-label="تنظیم تاریخ"
-                          className="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 inline-flex items-center justify-center transition-colors"
+                          className="w-8 h-8 rounded-lg bg-white ring-1 ring-zinc-950/10 text-zinc-600 hover:bg-zinc-50 inline-flex items-center justify-center transition-colors"
                         >
                           <SlidersHorizontal className="w-3.5 h-3.5" />
                         </button>
@@ -825,14 +1038,14 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                           onClick={() => setPayslipWorkerId(worker.id)}
                           title="فیش کارکرد"
                           aria-label="فیش کارکرد"
-                          className="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 hover:bg-slate-200 inline-flex items-center justify-center transition-colors"
+                          className="w-8 h-8 rounded-lg bg-white ring-1 ring-zinc-950/10 text-zinc-600 hover:bg-zinc-50 inline-flex items-center justify-center transition-colors"
                         >
-                          <FileText className="w-3.5 h-3.5 text-emerald-700" />
+                          <FileText className="w-3.5 h-3.5 text-emerald-600" />
                         </button>
                         <button
                           type="button"
                           onClick={() => openSettleModal(worker, acc)}
-                          className="h-8 px-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center whitespace-nowrap transition-colors"
+                          className="h-8 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center whitespace-nowrap transition-colors"
                         >
                           تسویه
                         </button>
@@ -843,9 +1056,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     <div className="hidden lg:flex lg:col-span-3 flex-col items-end font-mono-num pl-2">
                       <div className="text-sm font-extrabold text-emerald-700">
                         {formatToman(acc.netPayableToToday)}{' '}
-                        <span className="text-[11px] font-normal text-slate-400">تومان</span>
+                        <span className="text-[11px] font-normal text-zinc-400">تومان</span>
                       </div>
-                      <div className="text-[11px] text-slate-500 flex items-center gap-2">
+                      <div className="text-[11px] text-zinc-500 flex items-center gap-2">
                         {acc.effectiveOvertimeHours > 0 && (
                           <span className="text-sky-700">
                             +{toPersianDigits(acc.effectiveOvertimeHours)} س اضافه‌کار
@@ -873,8 +1086,8 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         aria-label="تقویم کارکرد"
                         className={`w-8 h-8 rounded-lg inline-flex items-center justify-center transition-colors ${
                           isCalendarOpen
-                            ? 'bg-emerald-700 text-white'
-                            : 'bg-slate-100 hover:bg-slate-200 text-slate-600'
+                            ? 'bg-zinc-950 text-white shadow-xs'
+                            : 'bg-white ring-1 ring-zinc-950/10 shadow-2xs hover:bg-zinc-50 text-zinc-600'
                         }`}
                       >
                         <Calendar className="w-4 h-4" />
@@ -887,7 +1100,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                           acc.endDate ? formatShamsiDayMonth(acc.endDate) : 'امروز'
                         })`}
                         aria-label="تنظیم تاریخ"
-                        className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 inline-flex items-center justify-center transition-colors"
+                        className="w-8 h-8 rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs hover:bg-zinc-50 text-zinc-600 inline-flex items-center justify-center transition-colors"
                       >
                         <SlidersHorizontal className="w-4 h-4" />
                       </button>
@@ -897,15 +1110,15 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         onClick={() => setPayslipWorkerId(worker.id)}
                         title="مشاهده فیش حقوقی"
                         aria-label="مشاهده فیش حقوقی"
-                        className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600 inline-flex items-center justify-center transition-colors"
+                        className="w-8 h-8 rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs hover:bg-zinc-50 text-zinc-600 inline-flex items-center justify-center transition-colors"
                       >
-                        <FileText className="w-4 h-4 text-emerald-700" />
+                        <FileText className="w-4 h-4 text-emerald-600" />
                       </button>
 
                       <button
                         type="button"
                         onClick={() => openSettleModal(worker, acc)}
-                        className="h-8 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+                        className="h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center gap-1 whitespace-nowrap transition-colors"
                       >
                         <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                         <span>تسویه</span>
@@ -938,21 +1151,21 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               return (
                 <div
                   key={worker.id}
-                  className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-5 space-y-3 sm:space-y-4 transition-colors"
+                  className="bg-white ring-1 ring-zinc-950/10 hover:ring-zinc-950/20 shadow-2xs rounded-xl p-3.5 sm:p-5 space-y-3 sm:space-y-4 transition-all"
                 >
                   {/* Zone 1: Identity + Prominent Net Payable */}
                   <div className="flex items-start justify-between gap-2.5">
                     <div className="flex items-center gap-3 min-w-0">
                       <div
-                        className={`hidden sm:flex w-10 h-10 rounded-xl border ${avatarTone} font-extrabold text-sm items-center justify-center shrink-0`}
+                        className={`hidden sm:flex w-10 h-10 rounded-lg border ${avatarTone} font-extrabold text-sm items-center justify-center shrink-0`}
                       >
                         {worker.name.trim().charAt(0)}
                       </div>
                       <div className="min-w-0">
-                        <h3 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
+                        <h3 className="text-sm sm:text-[15px] font-extrabold text-zinc-950 tracking-tight truncate">
                           {worker.name}
                         </h3>
-                        <div className="text-[11px] sm:text-xs text-slate-500 font-mono-num truncate mt-0.5">
+                        <div className="text-[11px] sm:text-xs text-zinc-500 font-mono-num truncate mt-0.5">
                           {worker.role} ·{' '}
                           {worker.wage_type === 'daily'
                             ? `روزمزد ${formatToman(worker.base_wage)} ت`
@@ -962,12 +1175,12 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     </div>
 
                     <div className="text-left font-mono-num shrink-0">
-                      <span className="text-[10px] sm:text-[11px] text-slate-500 block leading-tight">
+                      <span className="text-[10px] sm:text-[11px] text-zinc-500 block leading-tight">
                         مانده پرداخت
                       </span>
                       <span className="text-sm sm:text-base font-extrabold text-emerald-700 mt-0.5 block">
                         {formatToman(acc.netPayableToToday)}{' '}
-                        <span className="text-[10px] sm:text-[11px] font-normal text-slate-400">
+                        <span className="text-[10px] sm:text-[11px] font-normal text-zinc-400">
                           ت
                         </span>
                       </span>
@@ -975,11 +1188,11 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   </div>
 
                   {/* Zone 2: Date Range + Friday Toggle + Calm Stepper */}
-                  <div className="pt-2.5 sm:pt-3.5 border-t border-slate-100 space-y-2.5 sm:space-y-3.5">
+                  <div className="pt-2.5 sm:pt-3.5 border-t border-zinc-950/5 space-y-2.5 sm:space-y-3">
                     <div className="flex items-center justify-between gap-2">
-                      <div className="text-[11px] sm:text-xs font-mono-num text-slate-600 truncate">
-                        <span className="hidden sm:inline text-slate-400">بازه: </span>
-                        <strong className="text-slate-800">
+                      <div className="text-[11px] sm:text-xs font-mono-num text-zinc-500 truncate">
+                        <span className="hidden sm:inline text-zinc-400">بازه: </span>
+                        <strong className="text-zinc-900">
                           {formatShamsiDayMonth(acc.startDate)} تا{' '}
                           {acc.endDate ? formatShamsiDayMonth(acc.endDate) : 'امروز'}
                         </strong>
@@ -994,10 +1207,10 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         {worker.wage_type === 'daily' && (
                           <label
                             title="با تیک زدن، جمعه‌های این کارگر روزمزد تعطیل (۰ روز) محاسبه می‌شود"
-                            className={`h-7 sm:h-8 px-2 sm:px-2.5 rounded-lg border text-[10px] sm:text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer select-none transition-colors ${
+                            className={`h-7 sm:h-7.5 px-2 sm:px-2.5 rounded-lg ring-1 ring-inset text-[10px] sm:text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer select-none transition-colors ${
                               worker.fridays_off
-                                ? 'bg-amber-50 border-amber-200 text-amber-800'
-                                : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                                ? 'bg-amber-50 ring-amber-600/20 text-amber-800'
+                                : 'bg-zinc-50 ring-zinc-950/10 text-zinc-600 hover:bg-zinc-100'
                             }`}
                           >
                             <input
@@ -1020,30 +1233,30 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                           type="button"
                           onClick={() => openRangeAndDaysEditor(worker)}
                           title="تغییر تاریخ و کارکرد"
-                          className="h-7 sm:h-8 px-2 sm:px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-[10px] sm:text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition-colors"
+                          className="h-7 sm:h-7.5 px-2 sm:px-2.5 rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs hover:bg-zinc-50 text-zinc-700 text-[10px] sm:text-[11px] font-bold inline-flex items-center gap-1 shrink-0 transition-colors"
                         >
-                          <SlidersHorizontal className="w-3 h-3 sm:w-3.5 sm:h-3.5" />
+                          <SlidersHorizontal className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-zinc-500" />
                           <span className="sm:hidden">تاریخ</span>
                           <span className="hidden sm:inline">تغییر تاریخ</span>
                         </button>
                       </div>
                     </div>
 
-                    {/* Calm Worked Days Stepper */}
-                    <div className="flex items-center justify-between gap-2 bg-slate-50/90 border border-slate-200/80 rounded-xl p-1 font-mono-num">
+                    {/* Catalyst Worked Days Stepper */}
+                    <div className="flex items-center justify-between gap-2 bg-zinc-50/90 ring-1 ring-zinc-950/5 rounded-xl p-1 font-mono-num">
                       <button
                         type="button"
                         onClick={() => handleQuickAdjustWorkedDays(worker, acc, -1)}
                         title="کسر ۱ روز"
                         aria-label="کسر ۱ روز"
-                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-white hover:bg-rose-50 hover:text-rose-600 border border-slate-200/80 active:scale-95 text-slate-700 flex items-center justify-center transition-all shrink-0"
+                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-white hover:bg-rose-50 hover:text-rose-600 ring-1 ring-zinc-950/10 shadow-2xs active:scale-95 text-zinc-700 flex items-center justify-center transition-all shrink-0"
                       >
                         <Minus className="w-4 h-4 stroke-[2.5]" />
                       </button>
 
                       <div className="flex flex-col items-center justify-center min-w-0 px-2">
                         <div className="flex items-center gap-1.5">
-                          <span className="text-sm font-extrabold text-slate-900 leading-none whitespace-nowrap">
+                          <span className="text-sm font-extrabold text-zinc-950 leading-none whitespace-nowrap">
                             {toPersianDigits(acc.effectiveDaysToToday)} روز کارکرد
                           </span>
                           {(acc.isDaysManuallyEdited || acc.manualAbsentDays > 0) && (
@@ -1058,7 +1271,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                             </button>
                           )}
                         </div>
-                        <span className="mt-1 text-[10px] font-medium text-slate-500 leading-none whitespace-nowrap truncate max-w-full">
+                        <span className="mt-1 text-[10px] font-medium text-zinc-500 leading-none whitespace-nowrap truncate max-w-full">
                           {acc.isDaysManuallyEdited
                             ? 'ویرایش دستی'
                             : worker.wage_type === 'daily' && worker.fridays_off
@@ -1072,7 +1285,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         onClick={() => handleQuickAdjustWorkedDays(worker, acc, 1)}
                         title="افزودن ۱ روز"
                         aria-label="افزودن ۱ روز"
-                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-white hover:bg-emerald-50 hover:text-emerald-700 border border-slate-200/80 active:scale-95 text-slate-700 flex items-center justify-center transition-all shrink-0"
+                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg bg-white hover:bg-emerald-50 hover:text-emerald-700 ring-1 ring-zinc-950/10 shadow-2xs active:scale-95 text-zinc-700 flex items-center justify-center transition-all shrink-0"
                       >
                         <Plus className="w-4 h-4 stroke-[2.5]" />
                       </button>
@@ -1080,45 +1293,67 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   </div>
 
                   {/* Zone 3: Hairline-Divided Financial Breakdown */}
-                  <div className="grid grid-cols-3 divide-x divide-x-reverse divide-slate-100 pt-2.5 sm:pt-3.5 border-t border-slate-100 text-center font-mono-num">
+                  <div className="grid grid-cols-3 divide-x divide-x-reverse divide-zinc-950/5 pt-2.5 sm:pt-3.5 border-t border-zinc-950/5 text-center font-mono-num">
                     <div className="px-1">
-                      <span className="text-[10px] sm:text-[11px] text-slate-500 block">
+                      <span className="text-[10px] sm:text-[11px] text-zinc-500 block">
                         دستمزد پایه
                       </span>
-                      <span className="text-xs sm:text-[13px] font-bold text-slate-900 mt-0.5 block truncate">
+                      <span className="text-xs sm:text-[13px] font-bold text-zinc-950 mt-0.5 block truncate">
                         {formatToman(acc.baseEarnedToToday)} ت
                       </span>
                     </div>
 
                     <div className="px-1">
-                      <span className="text-[10px] sm:text-[11px] text-slate-500 block">
-                        اضافه‌کار ({toPersianDigits(acc.effectiveOvertimeHours)}س)
+                      <span className="text-[10px] sm:text-[11px] text-zinc-500 block">
+                        اضافه‌کار / مزایا
                       </span>
                       <span className="text-xs sm:text-[13px] font-bold text-sky-700 mt-0.5 block truncate">
-                        {formatToman(acc.overtimeEarnedToToday + acc.bonusToToday)} ت
+                        {formatToman(
+                          acc.overtimeEarnedToToday +
+                            acc.bonusToToday +
+                            (acc.fixedAllowance || 0) +
+                            (acc.extraAllowancesToToday || 0)
+                        )}{' '}
+                        ت
                       </span>
                     </div>
 
                     <div className="px-1">
-                      <span className="text-[10px] sm:text-[11px] text-slate-500 block">مساعده</span>
+                      <span className="text-[10px] sm:text-[11px] text-zinc-500 block">مساعده</span>
                       <span className="text-xs sm:text-[13px] font-bold text-amber-700 mt-0.5 block truncate">
                         {formatToman(acc.paidToToday)} ت
                       </span>
                     </div>
                   </div>
 
+                  {((acc.carryOverBalance || 0) !== 0 || acc.usedWageHistory) && (
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono-num text-zinc-500">
+                      {(acc.carryOverBalance || 0) !== 0 && (
+                        <span className="px-2 py-0.5 rounded-md bg-zinc-100 text-zinc-700 font-semibold">
+                          مانده دوره قبل: {acc.carryOverBalance > 0 ? '+' : ''}
+                          {formatToman(acc.carryOverBalance)} ت
+                        </span>
+                      )}
+                      {acc.usedWageHistory && (
+                        <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 font-semibold">
+                          محاسبه با تاریخچه نرخ
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {/* Zone 4: Single-Row Action Footer */}
-                  <div className="flex items-center justify-between gap-1.5 sm:gap-2 pt-2.5 sm:pt-3.5 border-t border-slate-100">
+                  <div className="flex items-center justify-between gap-1.5 sm:gap-2 pt-2.5 sm:pt-3.5 border-t border-zinc-950/5">
                     <div className="flex items-center gap-1.5 sm:gap-2">
                       <button
                         type="button"
                         onClick={() =>
                           setOpenCalendarWorkerId(isCalendarOpen ? null : worker.id)
                         }
-                        className={`h-9 px-2.5 sm:px-3 rounded-xl text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap ${
+                        className={`h-9 px-2.5 sm:px-3 rounded-lg text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap ${
                           isCalendarOpen
-                            ? 'bg-slate-900 text-white'
-                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                            ? 'bg-zinc-950 text-white shadow-xs inset-ring inset-ring-white/10'
+                            : 'bg-white ring-1 ring-zinc-950/10 shadow-2xs hover:bg-zinc-50 text-zinc-700'
                         }`}
                       >
                         <Calendar className="w-3.5 h-3.5 shrink-0" />
@@ -1136,9 +1371,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       <button
                         type="button"
                         onClick={() => setPayslipWorkerId(worker.id)}
-                        className="h-9 px-2.5 sm:px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap"
+                        className="h-9 px-2.5 sm:px-3 rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs hover:bg-zinc-50 text-zinc-700 text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap"
                       >
-                        <FileText className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                        <FileText className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                         <span className="sm:hidden">فیش</span>
                         <span className="hidden sm:inline">فیش کارکرد</span>
                       </button>
@@ -1147,7 +1382,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     <button
                       type="button"
                       onClick={() => openSettleModal(worker, acc)}
-                      className="h-9 px-3 sm:px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-all whitespace-nowrap shrink-0"
+                      className="h-9 px-3 sm:px-4 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center gap-1 sm:gap-1.5 transition-all whitespace-nowrap shrink-0"
                     >
                       <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                       <span className="sm:hidden">تسویه</span>
@@ -1166,23 +1401,23 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       {/* Modal 1: Edit Entry/Exit Dates & Worked Days */}
       {editingWorker && editingWorkerAccrued && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
+          className="fixed inset-0 z-50 bg-zinc-950/45 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
           onClick={() => setEditingWorkerId(null)}
         >
           <div
-            className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-xl overflow-hidden"
+            className="bg-white ring-1 ring-zinc-950/10 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="sm:hidden pt-2.5 pb-1 flex justify-center shrink-0">
-              <span className="w-10 h-1 rounded-full bg-slate-300" />
+              <span className="w-10 h-1 rounded-full bg-zinc-300" />
             </div>
 
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 shrink-0">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-950/5 shrink-0">
               <div>
-                <h3 className="text-sm sm:text-base font-extrabold text-slate-900">
+                <h3 className="text-sm sm:text-base font-extrabold text-zinc-950 tracking-tight">
                   تنظیم بازه و کارکرد — {editingWorker.name}
                 </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-xs text-zinc-500 mt-0.5">
                   تاریخ ورود، خروج و تنظیمات دستی روز و اضافه‌کار
                 </p>
               </div>
@@ -1190,7 +1425,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 type="button"
                 onClick={() => setEditingWorkerId(null)}
                 aria-label="بستن"
-                className="w-10 h-10 sm:w-9 sm:h-9 rounded-xl border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100"
+                className="w-9 h-9 rounded-lg ring-1 ring-zinc-950/10 bg-white flex items-center justify-center text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1199,14 +1434,14 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
             <div className="p-5 space-y-4 overflow-y-auto">
               {/* Entry Date */}
               <div className="space-y-1.5">
-                <label className="block text-xs font-bold text-slate-800">
+                <label className="block text-xs font-bold text-zinc-800">
                   تاریخ ورود (شروع کار)
                 </label>
                 <div className="grid grid-cols-3 gap-2 font-mono-num">
                   <select
                     value={startJd}
                     onChange={(e) => setStartJd(Number(e.target.value))}
-                    className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                    className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                   >
                     {Array.from(
                       { length: getShamsiMonthLength(startJy, startJm) },
@@ -1224,7 +1459,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       setStartJm(nextM);
                       setStartJd((prev) => Math.min(prev, getShamsiMonthLength(startJy, nextM)));
                     }}
-                    className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                    className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                   >
                     {PERSIAN_MONTHS.map((m, idx) => (
                       <option key={m} value={idx + 1}>
@@ -1239,7 +1474,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       setStartJy(nextY);
                       setStartJd((prev) => Math.min(prev, getShamsiMonthLength(nextY, startJm)));
                     }}
-                    className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                    className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                   >
                     {yearOptions.map((y) => (
                       <option key={y} value={y}>
@@ -1251,17 +1486,17 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               </div>
 
               {/* Exit Date */}
-              <div className="pt-3.5 border-t border-slate-100 space-y-2">
+              <div className="pt-3.5 border-t border-zinc-950/5 space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-slate-800">
+                  <label className="text-xs font-bold text-zinc-800">
                     تاریخ خروج (پایان دوره)
                   </label>
-                  <label className="text-xs text-slate-600 flex items-center gap-2 cursor-pointer min-h-[32px]">
+                  <label className="text-xs text-zinc-600 flex items-center gap-2 cursor-pointer min-h-[32px]">
                     <input
                       type="checkbox"
                       checked={hasEndDate}
                       onChange={(e) => setHasEndDate(e.target.checked)}
-                      className="w-4 h-4 rounded accent-emerald-700 cursor-pointer"
+                      className="w-4 h-4 rounded accent-zinc-950 cursor-pointer"
                     />
                     <span>دارای تاریخ خروج</span>
                   </label>
@@ -1272,7 +1507,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     <select
                       value={endJd}
                       onChange={(e) => setEndJd(Number(e.target.value))}
-                      className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                      className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                     >
                       {Array.from(
                         { length: getShamsiMonthLength(endJy, endJm) },
@@ -1290,7 +1525,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         setEndJm(nextM);
                         setEndJd((prev) => Math.min(prev, getShamsiMonthLength(endJy, nextM)));
                       }}
-                      className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                      className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                     >
                       {PERSIAN_MONTHS.map((m, idx) => (
                         <option key={m} value={idx + 1}>
@@ -1305,7 +1540,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         setEndJy(nextY);
                         setEndJd((prev) => Math.min(prev, getShamsiMonthLength(nextY, endJm)));
                       }}
-                      className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                      className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                     >
                       {yearOptions.map((y) => (
                         <option key={y} value={y}>
@@ -1315,20 +1550,20 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     </select>
                   </div>
                 ) : (
-                  <p className="text-xs text-slate-500">مشغول به کار (محاسبه تا امروز)</p>
+                  <p className="text-xs text-zinc-500">مشغول به کار (محاسبه تا امروز)</p>
                 )}
               </div>
 
               {/* Calculation Mode, Friday Option & Manual Overrides */}
-              <div className="pt-3.5 border-t border-slate-100 space-y-3.5">
+              <div className="pt-3.5 border-t border-zinc-950/5 space-y-3.5">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  <label className="block text-xs font-bold text-zinc-700 mb-1.5">
                     مبنای محاسبه تقویم
                   </label>
                   <select
                     value={calcModeInput}
                     onChange={(e) => setCalcModeInput(e.target.value as CalcMode)}
-                    className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm font-semibold"
+                    className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs sm:text-sm font-semibold"
                   >
                     <option value="to_today">از تاریخ ورود تا امروز</option>
                     <option value="full_range">کل بازه ورود تا خروج</option>
@@ -1336,7 +1571,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 </div>
 
                 {editingWorker.wage_type === 'daily' && (
-                  <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200/80 cursor-pointer select-none">
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl bg-amber-50/70 ring-1 ring-amber-600/15 cursor-pointer select-none">
                     <input
                       type="checkbox"
                       checked={fridaysOffInput}
@@ -1354,7 +1589,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    <label className="block text-xs font-bold text-zinc-700 mb-1.5">
                       روز کارکرد دستی
                     </label>
                     <input
@@ -1364,12 +1599,12 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       value={manualWorkedDaysInput}
                       onChange={(e) => setManualWorkedDaysInput(e.target.value)}
                       placeholder={`خودکار (${editingWorkerAccrued.rawCalculatedDays})`}
-                      className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm font-mono-num font-bold"
+                      className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-sm font-mono-num font-bold"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                    <label className="block text-xs font-bold text-zinc-700 mb-1.5">
                       ساعت اضافه‌کاری کل
                     </label>
                     <input
@@ -1379,25 +1614,25 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       value={manualOvertimeInput}
                       onChange={(e) => setManualOvertimeInput(e.target.value)}
                       placeholder={`خودکار (${editingWorkerAccrued.loggedOvertimeHours})`}
-                      className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm font-mono-num"
+                      className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-sm font-mono-num"
                     />
                   </div>
                 </div>
               </div>
             </div>
 
-            <div className="px-5 py-3.5 border-t border-slate-100 flex items-center justify-end gap-2 shrink-0">
+            <div className="px-5 py-3.5 border-t border-zinc-950/5 flex items-center justify-end gap-2 shrink-0 bg-zinc-50/50">
               <button
                 type="button"
                 onClick={() => setEditingWorkerId(null)}
-                className="h-10 px-4 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                className="h-9.5 px-4 rounded-lg text-xs font-semibold text-zinc-600 hover:bg-zinc-100 transition-colors"
               >
                 انصراف
               </button>
               <button
                 type="button"
                 onClick={() => handleSaveEditor(editingWorker)}
-                className="h-10 px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors"
+                className="h-9.5 px-5 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white shadow-xs inset-ring inset-ring-white/10 text-xs font-bold transition-colors"
               >
                 ذخیره تغییرات
               </button>
@@ -1409,29 +1644,29 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       {/* Modal 2: Payslip Preview & PDF / Print Export */}
       {selectedPayslipWorker && selectedPayslipAccrued && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
+          className="fixed inset-0 z-50 bg-zinc-950/45 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
           onClick={() => setPayslipWorkerId(null)}
         >
           <div
-            className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-lg w-full overflow-hidden shadow-xl max-h-[92dvh] flex flex-col"
+            className="bg-white ring-1 ring-zinc-950/10 rounded-t-3xl sm:rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl max-h-[92dvh] flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="bg-slate-900 text-white p-4 sm:p-5 shrink-0 space-y-3.5">
+            <div className="bg-zinc-950 text-white p-4 sm:p-5 shrink-0 space-y-3.5">
               <div className="sm:hidden -mt-1.5 pb-0.5 flex justify-center">
                 <span className="w-10 h-1 rounded-full bg-white/25" />
               </div>
 
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-xl bg-white/15 border border-white/15 flex items-center justify-center font-extrabold text-sm shrink-0">
+                  <div className="w-10 h-10 rounded-lg bg-white/10 ring-1 ring-white/15 flex items-center justify-center font-extrabold text-sm shrink-0">
                     {selectedPayslipWorker.name.trim().charAt(0)}
                   </div>
                   <div className="min-w-0">
-                    <h3 className="text-sm sm:text-base font-extrabold text-white truncate">
+                    <h3 className="text-sm sm:text-base font-extrabold text-white tracking-tight truncate">
                       صورت‌حساب کارکرد — {selectedPayslipWorker.name}
                     </h3>
-                    <p className="text-xs text-slate-300 font-mono-num truncate mt-0.5">
+                    <p className="text-xs text-zinc-400 font-mono-num truncate mt-0.5">
                       {selectedPayslipWorker.role} ·{' '}
                       {selectedPayslipWorker.wage_type === 'daily'
                         ? `روزمزد ${formatToman(selectedPayslipWorker.base_wage)} ت`
@@ -1444,7 +1679,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setPayslipWorkerId(null)}
-                  className="w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white shrink-0 transition-colors"
+                  className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white shrink-0 transition-colors"
                   aria-label="بستن"
                 >
                   <X className="w-4 h-4" />
@@ -1475,7 +1710,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     }
                   }}
                   title="دانلود مستقیم فایل PDF صورت‌حساب کارکرد"
-                  className="h-9 px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white text-xs font-bold inline-flex items-center gap-1.5 transition-all disabled:opacity-60"
+                  className="h-9 px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center gap-1.5 transition-all disabled:opacity-60"
                 >
                   <Download
                     className={`w-3.5 h-3.5 ${isDownloadingPdf ? 'animate-bounce' : ''}`}
@@ -1501,7 +1736,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       todayIso,
                     })
                   }
-                  className="h-9 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                  className="h-9 px-3 rounded-lg bg-white/10 hover:bg-white/15 ring-1 ring-white/10 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
                 >
                   <Printer className="w-3.5 h-3.5" />
                   <span>چاپ</span>
@@ -1518,7 +1753,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     })
                   }
                   title="مشاهده در تب جدید با بزرگنمایی نامحدود"
-                  className="h-9 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                  className="h-9 px-3 rounded-lg bg-white/10 hover:bg-white/15 ring-1 ring-white/10 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                   <span>تب جدید</span>
@@ -1535,10 +1770,48 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                     })
                   }
                   title="دانلود فایل HTML آفلاین"
-                  className="h-9 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                  className="h-9 px-3 rounded-lg bg-white/10 hover:bg-white/15 ring-1 ring-white/10 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
                 >
                   <FileText className="w-3.5 h-3.5" />
                   <span>HTML</span>
+                </button>
+
+                <a
+                  href={buildWhatsAppPayslipUrl({
+                    worker: selectedPayslipWorker,
+                    accrued: selectedPayslipAccrued,
+                    payments: selectedPayslipPayments,
+                    todayIso,
+                  })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="ارسال خلاصه فیش در واتساپ"
+                  className="h-9 px-3 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 ring-1 ring-emerald-400/30 text-emerald-200 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>واتساپ</span>
+                </a>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const outcome = await sharePayslipSummary({
+                      worker: selectedPayslipWorker,
+                      accrued: selectedPayslipAccrued,
+                      payments: selectedPayslipPayments,
+                      todayIso,
+                    });
+                    onShowToast?.(
+                      outcome === 'shared'
+                        ? 'فیش حقوقی به اشتراک گذاشته شد'
+                        : 'خلاصه فیش حقوقی در حافظه کپی شد'
+                    );
+                  }}
+                  title="اشتراک‌گذاری یا کپی خلاصه فیش"
+                  className="h-9 px-3 rounded-lg bg-white/10 hover:bg-white/15 ring-1 ring-white/10 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>اشتراک</span>
                 </button>
               </div>
             </div>
@@ -1547,30 +1820,30 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
             <div className="p-4 sm:p-5 space-y-4 overflow-y-auto font-mono-num">
               {/* Period & Attendance Summary */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-right">
-                <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-2.5">
-                  <span className="text-[10px] text-slate-500 block">تاریخ ورود</span>
-                  <span className="text-xs font-extrabold text-slate-900 mt-0.5 block">
+                <div className="bg-zinc-50 ring-1 ring-zinc-950/5 rounded-xl p-2.5">
+                  <span className="text-[10px] text-zinc-500 block">تاریخ ورود</span>
+                  <span className="text-xs font-extrabold text-zinc-950 mt-0.5 block">
                     {formatShamsiDayMonth(selectedPayslipAccrued.startDate)}
                   </span>
                 </div>
 
-                <div className="bg-slate-50 border border-slate-200/80 rounded-xl p-2.5">
-                  <span className="text-[10px] text-slate-500 block">پایان دوره</span>
-                  <span className="text-xs font-extrabold text-slate-900 mt-0.5 block">
+                <div className="bg-zinc-50 ring-1 ring-zinc-950/5 rounded-xl p-2.5">
+                  <span className="text-[10px] text-zinc-500 block">پایان دوره</span>
+                  <span className="text-xs font-extrabold text-zinc-950 mt-0.5 block">
                     {selectedPayslipAccrued.endDate
                       ? formatShamsiDayMonth(selectedPayslipAccrued.endDate)
                       : 'مشغول به کار'}
                   </span>
                 </div>
 
-                <div className="bg-emerald-50/70 border border-emerald-200/80 rounded-xl p-2.5">
+                <div className="bg-emerald-50/70 ring-1 ring-emerald-600/15 rounded-xl p-2.5">
                   <span className="text-[10px] text-emerald-800 block">کارکرد خالص</span>
                   <span className="text-xs sm:text-sm font-extrabold text-emerald-800 mt-0.5 block">
                     {toPersianDigits(selectedPayslipAccrued.effectiveDaysToToday)} روز
                   </span>
                 </div>
 
-                <div className="bg-sky-50/70 border border-sky-200/80 rounded-xl p-2.5">
+                <div className="bg-sky-50/70 ring-1 ring-sky-600/15 rounded-xl p-2.5">
                   <span className="text-[10px] text-sky-800 block">اضافه‌کاری</span>
                   <span className="text-xs sm:text-sm font-extrabold text-sky-800 mt-0.5 block">
                     {toPersianDigits(selectedPayslipAccrued.effectiveOvertimeHours)} ساعت
@@ -1579,7 +1852,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               </div>
 
               {selectedPayslipAccrued.remainingDaysToWork !== null && (
-                <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl px-3.5 py-2 flex items-center justify-between text-xs">
+                <div className="bg-amber-50/70 ring-1 ring-amber-600/15 rounded-xl px-3.5 py-2 flex items-center justify-between text-xs">
                   <span className="text-amber-900">روزهای باقی‌مانده تا تاریخ خروج:</span>
                   <span className="font-extrabold text-amber-900">
                     {toPersianDigits(selectedPayslipAccrued.remainingDaysToWork)} روز
@@ -1596,9 +1869,9 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 );
                 const offCount = payslipCalDays.filter((d) => d.state === 'off_red').length;
                 return (
-                  <div className="bg-slate-50/80 border border-slate-200/80 rounded-2xl p-3.5 space-y-2.5">
+                  <div className="bg-zinc-50/80 ring-1 ring-zinc-950/5 rounded-xl p-3.5 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h4 className="text-xs font-extrabold text-slate-900">
+                      <h4 className="text-xs font-extrabold text-zinc-950">
                         تقویم کارکرد و تعطیلات
                       </h4>
                       <div className="flex items-center gap-3 text-[11px] font-semibold">
@@ -1616,13 +1889,13 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                             ? 'bg-rose-50 border-rose-300 text-rose-800'
                             : d.state === 'worked'
                             ? 'bg-emerald-50/90 border-emerald-300 text-emerald-900'
-                            : 'bg-white border-slate-200 text-slate-400';
+                            : 'bg-white border-zinc-200 text-zinc-400';
                         const badgeCls =
                           d.state === 'off_red'
                             ? 'bg-rose-100 text-rose-700'
                             : d.state === 'worked'
                             ? 'bg-emerald-100/80 text-emerald-800'
-                            : 'bg-slate-100 text-slate-500';
+                            : 'bg-zinc-100 text-zinc-500';
                         return (
                           <div
                             key={d.iso}
@@ -1648,16 +1921,16 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               })()}
 
               {/* Financial Breakdown */}
-              <div className="bg-slate-50/80 border border-slate-200/80 rounded-2xl p-3.5 space-y-2.5 text-xs">
+              <div className="bg-zinc-50/80 ring-1 ring-zinc-950/5 rounded-xl p-3.5 space-y-2.5 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-600">دستمزد پایه کارکرد</span>
-                  <span className="font-bold text-slate-900">
+                  <span className="text-zinc-600">دستمزد پایه کارکرد</span>
+                  <span className="font-bold text-zinc-950">
                     {formatToman(selectedPayslipAccrued.baseEarnedToToday)} تومان
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-600">
+                  <span className="text-zinc-600">
                     اضافه‌کاری ({toPersianDigits(selectedPayslipAccrued.effectiveOvertimeHours)}{' '}
                     ساعت)
                   </span>
@@ -1670,18 +1943,51 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   </span>
                 </div>
 
-                {selectedPayslipAccrued.deductionsToToday > 0 && (
+                {((selectedPayslipAccrued.fixedAllowance || 0) +
+                  (selectedPayslipAccrued.extraAllowancesToToday || 0)) > 0 && (
                   <div className="flex items-center justify-between">
-                    <span className="text-rose-700">کسورات / خسارت</span>
-                    <span className="font-bold text-rose-700">
-                      -{formatToman(selectedPayslipAccrued.deductionsToToday)} تومان
+                    <span className="text-sky-700">
+                      مزایا ({selectedPayslipWorker.fixed_allowance_label || 'مزایا و پاداش'})
+                    </span>
+                    <span className="font-bold text-sky-700">
+                      +
+                      {formatToman(
+                        (selectedPayslipAccrued.fixedAllowance || 0) +
+                          (selectedPayslipAccrued.extraAllowancesToToday || 0)
+                      )}{' '}
+                      تومان
                     </span>
                   </div>
                 )}
 
-                <div className="flex items-center justify-between pt-2.5 border-t border-slate-200">
-                  <span className="font-bold text-slate-800">جمع کل کارکرد</span>
-                  <span className="font-extrabold text-slate-900">
+                {((selectedPayslipAccrued.fixedDeduction || 0) +
+                  (selectedPayslipAccrued.deductionsToToday || 0)) > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-rose-700">کسورات / خسارت</span>
+                    <span className="font-bold text-rose-700">
+                      -
+                      {formatToman(
+                        (selectedPayslipAccrued.fixedDeduction || 0) +
+                          (selectedPayslipAccrued.deductionsToToday || 0)
+                      )}{' '}
+                      تومان
+                    </span>
+                  </div>
+                )}
+
+                {(selectedPayslipAccrued.carryOverBalance || 0) !== 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-zinc-600">مانده انتقالی از دوره قبل</span>
+                    <span className="font-bold text-zinc-900">
+                      {selectedPayslipAccrued.carryOverBalance > 0 ? '+' : ''}
+                      {formatToman(selectedPayslipAccrued.carryOverBalance)} تومان
+                    </span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between pt-2.5 border-t border-zinc-950/10">
+                  <span className="font-bold text-zinc-800">جمع کل کارکرد</span>
+                  <span className="font-extrabold text-zinc-950">
                     {formatToman(selectedPayslipAccrued.grossEarnedToToday)} تومان
                   </span>
                 </div>
@@ -1693,13 +1999,13 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   </span>
                 </div>
 
-                <div className="pt-2.5 border-t border-slate-200 flex items-center justify-between">
-                  <span className="text-xs sm:text-sm font-extrabold text-slate-900">
+                <div className="pt-2.5 border-t border-zinc-950/10 flex items-center justify-between">
+                  <span className="text-xs sm:text-sm font-extrabold text-zinc-950">
                     مانده قابل پرداخت
                   </span>
                   <span className="text-base font-extrabold text-emerald-700">
                     {formatToman(selectedPayslipAccrued.netPayableToToday)}{' '}
-                    <span className="text-xs font-normal text-slate-500">تومان</span>
+                    <span className="text-xs font-normal text-zinc-500">تومان</span>
                   </span>
                 </div>
               </div>
@@ -1707,54 +2013,63 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               {/* Payments History List */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-extrabold text-slate-800">
+                  <h4 className="text-xs font-extrabold text-zinc-900">
                     ریز مساعده‌ها و پرداختی‌ها
                   </h4>
-                  <span className="text-xs text-slate-500">
+                  <span className="text-xs text-zinc-500">
                     {toPersianDigits(selectedPayslipPayments.length)} مورد
                   </span>
                 </div>
 
                 {selectedPayslipPayments.length === 0 ? (
-                  <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-3.5 text-center text-xs text-slate-500">
+                  <div className="bg-zinc-50 ring-1 ring-zinc-950/5 rounded-xl p-3.5 text-center text-xs text-zinc-500">
                     هیچ پرداختی برای این کارگر ثبت نشده است.
                   </div>
                 ) : (
-                  <div className="border border-slate-200/80 rounded-xl divide-y divide-slate-100 max-h-44 overflow-y-auto">
+                  <div className="ring-1 ring-zinc-950/10 rounded-xl divide-y divide-zinc-950/5 max-h-44 overflow-y-auto">
                     {selectedPayslipPayments.map((p) => {
                       const typeLabel =
                         p.payment_type === 'advance'
                           ? 'مساعده'
                           : p.payment_type === 'salary'
                           ? 'تسویه حقوق'
+                          : p.payment_type === 'allowance'
+                          ? 'مزایا / پاداش'
                           : 'کسر / جریمه';
                       const typeColor =
                         p.payment_type === 'advance'
                           ? 'text-amber-700'
                           : p.payment_type === 'salary'
                           ? 'text-emerald-700'
+                          : p.payment_type === 'allowance'
+                          ? 'text-sky-700'
                           : 'text-rose-700';
 
                       return (
                         <div
                           key={p.id}
-                          className="px-3 py-2.5 flex items-center justify-between gap-2"
+                          className={`px-3 py-2.5 flex items-center justify-between gap-2 ${
+                            p.period_archived ? 'opacity-60' : ''
+                          }`}
                         >
                           <div className="min-w-0">
-                            <div className="text-xs flex items-center gap-1.5">
+                            <div className="text-xs flex items-center gap-1.5 flex-wrap">
                               <span className={`font-bold ${typeColor}`}>{typeLabel}</span>
-                              <span className="text-slate-500">
+                              <span className="text-zinc-500">
                                 · {formatShamsiShort(p.payment_date)}
                               </span>
+                              {p.period_archived === 1 && (
+                                <span className="text-[10px] text-zinc-400">· دوره قبل</span>
+                              )}
                             </div>
                             {p.note && (
-                              <p className="text-[11px] text-slate-500 truncate mt-0.5">{p.note}</p>
+                              <p className="text-[11px] text-zinc-500 truncate mt-0.5">{p.note}</p>
                             )}
                           </div>
 
-                          <div className="text-left shrink-0 text-xs font-extrabold text-slate-900">
+                          <div className="text-left shrink-0 text-xs font-extrabold text-zinc-950">
                             {formatToman(p.amount)}{' '}
-                            <span className="text-[10px] font-normal text-slate-400">ت</span>
+                            <span className="text-[10px] font-normal text-zinc-400">ت</span>
                           </div>
                         </div>
                       );
@@ -1770,7 +2085,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
       {/* Modal 3: Advance & Settlement */}
       {settleModalWorker && settleModalAccrued && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
+          className="fixed inset-0 z-50 bg-zinc-950/45 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
           onClick={() => setSettleModalWorkerId(null)}
         >
           <form
@@ -1793,16 +2108,16 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               );
               setSettleModalWorkerId(null);
             }}
-            className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-xl overflow-hidden"
+            className="bg-white ring-1 ring-zinc-950/10 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="bg-slate-900 text-white px-5 py-4 flex items-center justify-between gap-2 shrink-0">
+            <div className="bg-zinc-950 text-white px-5 py-4 flex items-center justify-between gap-2 shrink-0">
               <div>
-                <h3 className="text-sm sm:text-base font-extrabold text-white">
+                <h3 className="text-sm sm:text-base font-extrabold text-white tracking-tight">
                   ثبت مساعده و تسویه — {settleModalWorker.name}
                 </h3>
-                <p className="text-xs text-slate-300 mt-0.5 font-mono-num">
+                <p className="text-xs text-zinc-400 mt-0.5 font-mono-num">
                   {settleModalWorker.project_name
                     ? `${settleModalWorker.project_name} · `
                     : ''}
@@ -1813,7 +2128,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                 type="button"
                 onClick={() => setSettleModalWorkerId(null)}
                 aria-label="بستن"
-                className="w-9 h-9 rounded-xl bg-white/10 hover:bg-white/20 flex items-center justify-center text-white shrink-0 transition-colors"
+                className="w-9 h-9 rounded-lg bg-white/10 hover:bg-white/20 flex items-center justify-center text-white shrink-0 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1821,15 +2136,15 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
             <div className="p-5 space-y-4 overflow-y-auto font-mono-num">
               {/* Financial Summary Strip */}
-              <div className="grid grid-cols-3 divide-x divide-x-reverse divide-slate-200 text-center bg-slate-50 border border-slate-200/80 rounded-xl py-2.5">
+              <div className="grid grid-cols-3 divide-x divide-x-reverse divide-zinc-950/5 text-center bg-zinc-50 ring-1 ring-zinc-950/5 rounded-xl py-2.5">
                 <div className="px-1">
-                  <span className="text-[10px] text-slate-500 block">کل کارکرد</span>
-                  <span className="text-xs font-extrabold text-slate-900 mt-0.5 block">
+                  <span className="text-[10px] text-zinc-500 block">کل کارکرد</span>
+                  <span className="text-xs font-extrabold text-zinc-950 mt-0.5 block">
                     {formatToman(settleModalAccrued.grossEarnedToToday)} ت
                   </span>
                 </div>
                 <div className="px-1">
-                  <span className="text-[10px] text-slate-500 block">دریافتی قبلی</span>
+                  <span className="text-[10px] text-zinc-500 block">دریافتی قبلی</span>
                   <span className="text-xs font-extrabold text-amber-700 mt-0.5 block">
                     {formatToman(settleModalAccrued.paidToToday)} ت
                   </span>
@@ -1844,17 +2159,17 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
               {/* Payment Type */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                <label className="block text-xs font-bold text-zinc-700 mb-1.5">
                   نوع تراکنش
                 </label>
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     type="button"
                     onClick={() => setSettleType('advance')}
-                    className={`min-h-[42px] rounded-xl text-xs font-bold border transition-colors ${
+                    className={`min-h-[40px] rounded-lg text-xs font-bold transition-colors ${
                       settleType === 'advance'
-                        ? 'bg-amber-600 text-white border-amber-600'
-                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                        ? 'bg-amber-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                        : 'bg-zinc-50 text-zinc-700 ring-1 ring-zinc-950/10 hover:bg-zinc-100'
                     }`}
                   >
                     مساعده
@@ -1867,10 +2182,10 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                         setSettleAmountInput(String(settleModalAccrued.netPayableToToday));
                       }
                     }}
-                    className={`min-h-[42px] rounded-xl text-xs font-bold border transition-colors ${
+                    className={`min-h-[40px] rounded-lg text-xs font-bold transition-colors ${
                       settleType === 'salary'
-                        ? 'bg-emerald-700 text-white border-emerald-700'
-                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                        ? 'bg-emerald-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                        : 'bg-zinc-50 text-zinc-700 ring-1 ring-zinc-950/10 hover:bg-zinc-100'
                     }`}
                   >
                     تسویه کارکرد
@@ -1878,10 +2193,10 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setSettleType('deduction')}
-                    className={`min-h-[42px] rounded-xl text-xs font-bold border transition-colors ${
+                    className={`min-h-[40px] rounded-lg text-xs font-bold transition-colors ${
                       settleType === 'deduction'
-                        ? 'bg-rose-600 text-white border-rose-600'
-                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                        ? 'bg-rose-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                        : 'bg-zinc-50 text-zinc-700 ring-1 ring-zinc-950/10 hover:bg-zinc-100'
                     }`}
                   >
                     کسر / خسارت
@@ -1892,8 +2207,8 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               {/* Date Selector */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-slate-700 inline-flex items-center gap-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-slate-500" />
+                  <label className="text-xs font-bold text-zinc-700 inline-flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-zinc-500" />
                     <span>تاریخ پرداخت</span>
                   </label>
                   <button
@@ -1913,7 +2228,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   <select
                     value={settleJd}
                     onChange={(e) => setSettleJd(Number(e.target.value))}
-                    className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                    className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                   >
                     {Array.from(
                       { length: getShamsiMonthLength(settleJy, settleJm) },
@@ -1931,7 +2246,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       setSettleJm(nextM);
                       setSettleJd((prev) => Math.min(prev, getShamsiMonthLength(settleJy, nextM)));
                     }}
-                    className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                    className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                   >
                     {PERSIAN_MONTHS.map((m, idx) => (
                       <option key={m} value={idx + 1}>
@@ -1946,7 +2261,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       setSettleJy(nextY);
                       setSettleJd((prev) => Math.min(prev, getShamsiMonthLength(nextY, settleJm)));
                     }}
-                    className="h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-semibold"
+                    className="h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-semibold"
                   >
                     {yearOptions.map((y) => (
                       <option key={y} value={y}>
@@ -1960,7 +2275,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
               {/* Amount Input */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-bold text-slate-700">مبلغ (تومان) *</label>
+                  <label className="text-xs font-bold text-zinc-700">مبلغ (تومان) *</label>
                   {settleAmountInput && Number(settleAmountInput) > 0 && (
                     <span className="text-xs font-extrabold text-emerald-700">
                       {formatToman(Number(settleAmountInput))} تومان
@@ -1974,7 +2289,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   value={settleAmountInput}
                   onChange={(e) => setSettleAmountInput(e.target.value)}
                   placeholder="مثلاً: 1350000"
-                  className="w-full h-11 px-3.5 rounded-xl border border-slate-300 text-sm font-bold focus:border-emerald-600"
+                  className="w-full h-10.5 px-3.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-sm font-bold hover:border-zinc-950/25 focus:border-zinc-950"
                   required
                 />
 
@@ -1985,7 +2300,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       onClick={() =>
                         setSettleAmountInput(String(settleModalAccrued.netPayableToToday))
                       }
-                      className="h-8 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 text-xs font-bold transition-colors"
+                      className="h-8 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 ring-1 ring-inset ring-emerald-600/20 text-xs font-bold transition-colors"
                     >
                       کل مانده ({formatToman(settleModalAccrued.netPayableToToday)} ت)
                     </button>
@@ -1995,7 +2310,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       key={preset}
                       type="button"
                       onClick={() => setSettleAmountInput(String(preset))}
-                      className="h-8 px-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition-colors"
+                      className="h-8 px-2.5 rounded-lg bg-zinc-100 hover:bg-zinc-200/80 text-zinc-700 text-xs font-semibold transition-colors"
                     >
                       {formatToman(preset)}
                     </button>
@@ -2005,7 +2320,7 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
 
               {/* Optional Note */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                <label className="block text-xs font-bold text-zinc-700 mb-1.5">
                   توضیحات (کارت به کارت، نقدی، شماره پیگیری...)
                 </label>
                 <input
@@ -2013,22 +2328,22 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                   value={settleNoteInput}
                   onChange={(e) => setSettleNoteInput(e.target.value)}
                   placeholder="مثلاً: واریز کارت به کارت علی‌الحساب"
-                  className="w-full h-11 sm:h-10 px-3.5 rounded-xl border border-slate-300 text-xs sm:text-sm focus:border-emerald-600"
+                  className="w-full h-10 px-3.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs sm:text-sm hover:border-zinc-950/25 focus:border-zinc-950"
                 />
               </div>
 
               {/* Footer */}
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-zinc-950/5">
                 <button
                   type="button"
                   onClick={() => setSettleModalWorkerId(null)}
-                  className="h-10 px-4 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                  className="h-9.5 px-4 rounded-lg text-xs font-semibold text-zinc-600 hover:bg-zinc-100 transition-colors"
                 >
                   انصراف
                 </button>
                 <button
                   type="submit"
-                  className="h-10 px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+                  className="h-9.5 px-5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
                 >
                   <CheckCircle2 className="w-4 h-4" />
                   <span>
@@ -2036,12 +2351,311 @@ export const MonthlySheetView: React.FC<MonthlySheetViewProps> = ({
                       ? 'ثبت مساعده'
                       : settleType === 'salary'
                       ? 'ثبت تسویه کارکرد'
+                      : settleType === 'allowance'
+                      ? 'ثبت مزایا'
                       : 'ثبت کسر از حساب'}
                   </span>
                 </button>
               </div>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Modal 4: Period Close (Carry-Over Balance) & Month Lock */}
+      {showPeriodModal && (
+        <div
+          className="fixed inset-0 z-50 bg-zinc-950/45 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4 overflow-y-auto"
+          onClick={() => setShowPeriodModal(false)}
+        >
+          <div
+            className="bg-white ring-1 ring-zinc-950/10 rounded-t-3xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="sm:hidden pt-2.5 pb-1 flex justify-center shrink-0">
+              <span className="w-10 h-1 rounded-full bg-zinc-300" />
+            </div>
+
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-950/5 shrink-0">
+              <div>
+                <h3 className="text-sm sm:text-base font-extrabold text-zinc-950 tracking-tight">
+                  بستن دوره و قفل ماه — {activeProjectName}
+                </h3>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  انتقال خودکار مانده‌ها به دوره جدید یا قفل کردن تغییرات ماه
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPeriodModal(false)}
+                aria-label="بستن"
+                className="w-9 h-9 rounded-lg ring-1 ring-zinc-950/10 bg-white flex items-center justify-center text-zinc-500 hover:bg-zinc-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto">
+              {/* Segmented Switcher */}
+              <div className="grid grid-cols-2 bg-zinc-100 ring-1 ring-inset ring-zinc-950/5 p-1 rounded-xl gap-1">
+                <button
+                  type="button"
+                  onClick={() => setPeriodModalTab('close')}
+                  className={`h-9 rounded-lg text-xs font-bold transition-colors ${
+                    periodModalTab === 'close'
+                      ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-950/5'
+                      : 'text-zinc-600'
+                  }`}
+                >
+                  بستن دوره و انتقال مانده
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPeriodModalTab('lock')}
+                  className={`h-9 rounded-lg text-xs font-bold transition-colors ${
+                    periodModalTab === 'lock'
+                      ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-950/5'
+                      : 'text-zinc-600'
+                  }`}
+                >
+                  قفل / بازگشایی ماه
+                </button>
+              </div>
+
+              {periodModalTab === 'close' ? (
+                <div className="space-y-4">
+                  <div className="p-3.5 rounded-xl bg-amber-50/80 ring-1 ring-inset ring-amber-600/20 text-xs text-amber-950 leading-relaxed space-y-1.5">
+                    <div className="font-extrabold">عملکرد بستن دوره چیست؟</div>
+                    <p>
+                      مانده قابل پرداخت فعلی هر کارگر (جمع کل:{' '}
+                      <strong className="font-mono-num">
+                        {formatToman(totalNetToTodayAll)} تومان
+                      </strong>
+                      ) به فیلد <strong>مانده دوره قبل</strong> منتقل می‌شود، تراکنش‌های دوره قبل
+                      بایگانی می‌شوند و تاریخ شروع کارکرد از تاریخ جدید محاسبه می‌گردد.
+                    </p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-bold text-zinc-700">
+                      تاریخ شروع دوره جدید
+                    </label>
+                    <div className="grid grid-cols-3 gap-2 font-mono-num">
+                      <select
+                        value={closeNextJd}
+                        onChange={(e) => setCloseNextJd(Number(e.target.value))}
+                        className="h-10 px-2 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-bold"
+                      >
+                        {Array.from(
+                          { length: getShamsiMonthLength(closeNextJy, closeNextJm) },
+                          (_, i) => i + 1
+                        ).map((d) => (
+                          <option key={d} value={d}>
+                            روز {toPersianDigits(d)}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={closeNextJm}
+                        onChange={(e) => {
+                          const nextM = Number(e.target.value);
+                          setCloseNextJm(nextM);
+                          setCloseNextJd((prev) =>
+                            Math.min(prev, getShamsiMonthLength(closeNextJy, nextM))
+                          );
+                        }}
+                        className="h-10 px-2 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-bold"
+                      >
+                        {PERSIAN_MONTHS.map((m, idx) => (
+                          <option key={m} value={idx + 1}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={closeNextJy}
+                        onChange={(e) => {
+                          const nextY = Number(e.target.value);
+                          setCloseNextJy(nextY);
+                          setCloseNextJd((prev) =>
+                            Math.min(prev, getShamsiMonthLength(nextY, closeNextJm))
+                          );
+                        }}
+                        className="h-10 px-2 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-bold"
+                      >
+                        {yearOptions.map((y) => (
+                          <option key={y} value={y}>
+                            {toPersianDigits(y)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-xs text-zinc-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={lockCurrentOnClose}
+                      onChange={(e) => setLockCurrentOnClose(e.target.checked)}
+                      className="w-4 h-4 rounded accent-zinc-950"
+                    />
+                    <span>
+                      قفل کردن ماه {PERSIAN_MONTHS[todayShamsi.jm - 1]}{' '}
+                      {toPersianDigits(todayShamsi.jy)} پس از بستن دوره
+                    </span>
+                  </label>
+
+                  <button
+                    type="button"
+                    disabled={processingPeriodAction || !onClosePeriod || workers.length === 0}
+                    onClick={async () => {
+                      if (!onClosePeriod) return;
+                      setProcessingPeriodAction(true);
+                      try {
+                        const maxD = getShamsiMonthLength(closeNextJy, closeNextJm);
+                        const nextStartIso = shamsiToIso(
+                          closeNextJy,
+                          closeNextJm,
+                          Math.min(closeNextJd, maxD)
+                        );
+                        await onClosePeriod({
+                          project_id: selectedProjectId,
+                          next_start_date: nextStartIso,
+                          lock_current_month: lockCurrentOnClose,
+                          shamsi_year: todayShamsi.jy,
+                          shamsi_month: todayShamsi.jm,
+                        });
+                        setShowPeriodModal(false);
+                      } finally {
+                        setProcessingPeriodAction(false);
+                      }
+                    }}
+                    className="w-full h-10.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white shadow-xs inset-ring inset-ring-white/10 text-xs font-bold inline-flex items-center justify-center gap-2 disabled:opacity-50 transition-colors"
+                  >
+                    <Archive className="w-4 h-4 text-emerald-400" />
+                    <span>
+                      {processingPeriodAction
+                        ? 'در حال بستن دوره...'
+                        : 'تایید بستن دوره و انتقال مانده‌ها'}
+                    </span>
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-2 font-mono-num">
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-700 mb-1">ماه</label>
+                      <select
+                        value={lockJm}
+                        onChange={(e) => setLockJm(Number(e.target.value))}
+                        className="w-full h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-bold"
+                      >
+                        {PERSIAN_MONTHS.map((m, idx) => (
+                          <option key={m} value={idx + 1}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-zinc-700 mb-1">سال</label>
+                      <select
+                        value={lockJy}
+                        onChange={(e) => setLockJy(Number(e.target.value))}
+                        className="w-full h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-bold"
+                      >
+                        {yearOptions.map((y) => (
+                          <option key={y} value={y}>
+                            {toPersianDigits(y)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={processingPeriodAction || !onToggleMonthLock}
+                    onClick={async () => {
+                      if (!onToggleMonthLock) return;
+                      setProcessingPeriodAction(true);
+                      try {
+                        await onToggleMonthLock({
+                          project_id: currentProjectIdNumeric,
+                          shamsi_year: lockJy,
+                          shamsi_month: lockJm,
+                          locked: !isTargetLockMonthLocked,
+                        });
+                      } finally {
+                        setProcessingPeriodAction(false);
+                      }
+                    }}
+                    className={`w-full h-10.5 rounded-lg text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center justify-center gap-2 transition-colors disabled:opacity-50 ${
+                      isTargetLockMonthLocked
+                        ? 'bg-emerald-600 hover:bg-emerald-700'
+                        : 'bg-amber-600 hover:bg-amber-700'
+                    }`}
+                  >
+                    {isTargetLockMonthLocked ? (
+                      <>
+                        <Unlock className="w-4 h-4" />
+                        <span>
+                          باز کردن قفل {PERSIAN_MONTHS[lockJm - 1]} {toPersianDigits(lockJy)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Lock className="w-4 h-4" />
+                        <span>
+                          قفل کردن {PERSIAN_MONTHS[lockJm - 1]} {toPersianDigits(lockJy)}
+                        </span>
+                      </>
+                    )}
+                  </button>
+
+                  {lockedMonths.length > 0 && (
+                    <div className="space-y-2 pt-2 border-t border-zinc-950/5">
+                      <div className="text-xs font-bold text-zinc-700">ماه‌های قفل‌شده فعلی</div>
+                      <div className="ring-1 ring-zinc-950/10 rounded-xl divide-y divide-zinc-950/5 max-h-44 overflow-y-auto">
+                        {lockedMonths.map((lm) => (
+                          <div
+                            key={lm.id}
+                            className="px-3 py-2 flex items-center justify-between gap-2 text-xs font-mono-num"
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <Lock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                              <span className="font-bold text-zinc-900">
+                                {PERSIAN_MONTHS[lm.shamsi_month - 1]} {toPersianDigits(lm.shamsi_year)}
+                              </span>
+                              <span className="text-[11px] text-zinc-400">
+                                ({lm.project_id === 0 ? 'همه پروژه‌ها' : 'پروژه'})
+                              </span>
+                            </div>
+                            {onToggleMonthLock && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onToggleMonthLock({
+                                    project_id: lm.project_id,
+                                    shamsi_year: lm.shamsi_year,
+                                    shamsi_month: lm.shamsi_month,
+                                    locked: false,
+                                  })
+                                }
+                                className="h-7 px-2 rounded-md bg-zinc-100 hover:bg-zinc-200 text-[11px] font-bold text-zinc-700"
+                              >
+                                باز کردن
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

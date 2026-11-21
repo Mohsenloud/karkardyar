@@ -15,6 +15,8 @@ import {
   LayoutGrid,
   LayoutList,
   X,
+  Copy,
+  Lock,
 } from 'lucide-react';
 import { AccruedToTodaySummary, AttendanceStatus, DailyLog, Worker } from '../types';
 import {
@@ -59,6 +61,9 @@ interface DailyAttendanceViewProps {
     note?: string;
   }) => void;
   onBulkMarkPresent: (projectName: string) => void;
+  onCopyPreviousDay?: () => Promise<void>;
+  isMonthLocked?: boolean;
+  isSupervisor?: boolean;
   onOpenNewWorker: () => void;
   onOpenAccruedSheet: () => void;
 }
@@ -74,10 +79,14 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   onChangeViewMode,
   onSaveDailyLog,
   onBulkMarkPresent,
+  onCopyPreviousDay,
+  isMonthLocked = false,
+  isSupervisor = false,
   onOpenNewWorker,
   onOpenAccruedSheet,
 }) => {
   const activeWorkers = workers.filter((w) => w.active === 1);
+  const [copyingPrev, setCopyingPrev] = useState(false);
   const daysStrip = getDaysWindow(selectedDate, 3);
   const currentShamsi = isoToShamsi(selectedDate);
   const todayShamsi = isoToShamsi(todayIso);
@@ -113,6 +122,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   };
 
   const handleQuickStatus = (worker: Worker, status: AttendanceStatus) => {
+    if (isMonthLocked) return;
     const existing = getWorkerLog(worker.id);
     const daysEquiv =
       status === 'present' || status === 'paid_leave'
@@ -134,6 +144,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   };
 
   const handleOvertimeDelta = (worker: Worker, delta: number) => {
+    if (isMonthLocked) return;
     const existing = getWorkerLog(worker.id);
     const currentOt = existing ? Number(existing.overtime_hours || 0) : 0;
     const nextOt = Math.max(0, Math.round(currentOt + delta));
@@ -153,6 +164,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   };
 
   const handleSaveDetails = (worker: Worker) => {
+    if (isMonthLocked) return;
     const existing = getWorkerLog(worker.id);
     const status: AttendanceStatus = existing ? existing.status : 'present';
     const parsedDays = parseFloat(detailCustomDays);
@@ -162,11 +174,21 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
       status,
       days_equiv: Number.isFinite(parsedDays) && parsedDays >= 0 ? parsedDays : 1,
       overtime_hours: existing ? existing.overtime_hours : 0,
-      bonus_amount: Number(detailBonus) || 0,
+      bonus_amount: isSupervisor ? existing?.bonus_amount || 0 : Number(detailBonus) || 0,
       project_name: detailProject.trim(),
       note: detailNote.trim(),
     });
     setExpandedWorkerId(null);
+  };
+
+  const handleCopyPrevious = async () => {
+    if (!onCopyPreviousDay || isMonthLocked || activeWorkers.length === 0) return;
+    setCopyingPrev(true);
+    try {
+      await onCopyPreviousDay();
+    } finally {
+      setCopyingPrev(false);
+    }
   };
 
   const shiftDay = (deltaDays: number) => {
@@ -184,14 +206,14 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
   return (
     <div className="space-y-3 sm:space-y-4">
       {/* Top Date Bar & 7-Day Scroller */}
-      <section className="bg-white border border-slate-200/90 rounded-2xl p-3 sm:p-5 space-y-3 sm:space-y-4">
+      <section className="bg-white ring-1 ring-zinc-950/10 shadow-2xs rounded-2xl p-3 sm:p-5 space-y-3 sm:space-y-4">
         <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-2.5 sm:gap-3">
           {/* Row 1 on mobile: Date Navigator (centered & tappable to jump) */}
           <div className="flex items-center justify-between sm:justify-start gap-2">
             <button
               type="button"
               onClick={() => shiftDay(-1)}
-              className="w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900 active:scale-95 transition-all shrink-0"
+              className="w-9 h-9 flex items-center justify-center rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950 active:scale-95 transition-all shrink-0"
               title="روز قبل"
               aria-label="روز قبل"
             >
@@ -207,11 +229,11 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 setJumpDay(sh.jd);
                 setShowDateJump(true);
               }}
-              className="px-2 py-1 rounded-xl hover:bg-slate-50 transition-colors text-center sm:text-right min-w-0"
+              className="px-2 py-1 rounded-lg hover:bg-zinc-50 transition-colors text-center sm:text-right min-w-0"
               title="تغییر تاریخ"
             >
               <div className="flex items-center justify-center sm:justify-start gap-1.5 flex-wrap">
-                <h2 className="text-[13px] sm:text-base font-extrabold text-slate-900">
+                <h2 className="text-[13px] sm:text-base font-extrabold text-zinc-950 tracking-tight">
                   {formatShamsiFull(selectedDate)}
                 </h2>
                 {selectedDate === todayIso && (
@@ -226,7 +248,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             <button
               type="button"
               onClick={() => shiftDay(1)}
-              className="w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900 active:scale-95 transition-all shrink-0"
+              className="w-9 h-9 flex items-center justify-center rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs text-zinc-600 hover:bg-zinc-50 hover:text-zinc-950 active:scale-95 transition-all shrink-0"
               title="روز بعد"
               aria-label="روز بعد"
             >
@@ -236,22 +258,35 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
           {/* Row 2 on mobile: Compact Actions + View Switcher (Single non-wrapping row) */}
           <div className="flex items-center justify-between sm:justify-end gap-2">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
                 onClick={() => onBulkMarkPresent('')}
-                disabled={activeWorkers.length === 0}
-                className="h-9 px-3 sm:px-3.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white text-xs font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap disabled:opacity-50"
+                disabled={activeWorkers.length === 0 || isMonthLocked}
+                className="h-9 px-3 sm:px-3.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white shadow-xs inset-ring inset-ring-white/15 text-xs font-bold inline-flex items-center gap-1.5 transition-all whitespace-nowrap disabled:opacity-50"
               >
                 <CheckCheck className="w-4 h-4" />
                 <span>حضور همه</span>
               </button>
 
+              {onCopyPreviousDay && (
+                <button
+                  type="button"
+                  onClick={handleCopyPrevious}
+                  disabled={activeWorkers.length === 0 || isMonthLocked || copyingPrev}
+                  title="کپی وضعیت حضور و اضافه‌کاری از روز قبل به این روز"
+                  className="h-9 px-2.5 sm:px-3 rounded-lg bg-white hover:bg-zinc-50 ring-1 ring-zinc-950/10 shadow-2xs text-zinc-800 text-xs font-bold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap disabled:opacity-50"
+                >
+                  <Copy className="w-3.5 h-3.5 text-zinc-500" />
+                  <span>{copyingPrev ? 'در حال کپی...' : 'کپی از دیروز'}</span>
+                </button>
+              )}
+
               {selectedDate !== todayIso && (
                 <button
                   type="button"
                   onClick={() => onSelectDate(todayIso)}
-                  className="h-9 px-2.5 sm:px-3 rounded-xl text-xs font-bold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition-colors whitespace-nowrap"
+                  className="h-9 px-2.5 sm:px-3 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-600/20 hover:bg-emerald-100 transition-colors whitespace-nowrap"
                 >
                   امروز
                 </button>
@@ -270,22 +305,22 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 }}
                 title="تغییر تاریخ"
                 aria-label="تغییر تاریخ"
-                className="h-9 w-9 sm:w-auto sm:px-3 rounded-xl text-xs font-bold border border-slate-200 text-slate-700 hover:bg-slate-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
+                className="h-9 w-9 sm:w-auto sm:px-3 rounded-lg text-xs font-bold bg-white ring-1 ring-zinc-950/10 shadow-2xs text-zinc-700 hover:bg-zinc-50 inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
               >
-                <Calendar className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-slate-500" />
+                <Calendar className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-zinc-500" />
                 <span className="hidden sm:inline">تغییر تاریخ</span>
               </button>
 
-              {/* View Mode Toggle (icon-only on mobile, icon+label on sm:) */}
-              <div className="flex items-center gap-0.5 bg-slate-100 p-1 rounded-xl">
+              {/* View Mode Toggle */}
+              <div className="flex items-center gap-0.5 bg-zinc-200/70 ring-1 ring-inset ring-zinc-950/5 p-0.5 rounded-lg">
                 <button
                   type="button"
                   onClick={() => onChangeViewMode?.('card')}
                   aria-label="نمای کارتی"
-                  className={`h-7 w-8 sm:w-auto sm:px-2.5 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
+                  className={`h-7.5 w-8 sm:w-auto sm:px-2.5 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
                     viewMode === 'card'
-                      ? 'bg-white text-slate-900 shadow-2xs'
-                      : 'text-slate-500 hover:text-slate-900'
+                      ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-950/5'
+                      : 'text-zinc-500 hover:text-zinc-950'
                   }`}
                   title="نمای کارتی"
                 >
@@ -296,10 +331,10 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                   type="button"
                   onClick={() => onChangeViewMode?.('row')}
                   aria-label="نمای ردیفی"
-                  className={`h-7 w-8 sm:w-auto sm:px-2.5 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
+                  className={`h-7.5 w-8 sm:w-auto sm:px-2.5 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-all ${
                     viewMode === 'row'
-                      ? 'bg-white text-slate-900 shadow-2xs'
-                      : 'text-slate-500 hover:text-slate-900'
+                      ? 'bg-white text-zinc-950 shadow-2xs ring-1 ring-zinc-950/5'
+                      : 'text-zinc-500 hover:text-zinc-950'
                   }`}
                   title="نمای ردیفی"
                 >
@@ -312,7 +347,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
         </div>
 
         {/* 7-Day Touch Strip (Edge-to-edge 7-col grid on mobile, centered strip on sm:) */}
-        <div className="grid grid-cols-7 sm:flex sm:items-center sm:justify-center gap-1 sm:gap-2 pt-2.5 border-t border-slate-100">
+        <div className="grid grid-cols-7 sm:flex sm:items-center sm:justify-center gap-1 sm:gap-2 pt-2.5 border-t border-zinc-950/5">
           {daysStrip.map((item) => {
             const isSelected = item.iso === selectedDate;
             const isToday = item.iso === todayIso;
@@ -321,17 +356,17 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 key={item.iso}
                 type="button"
                 onClick={() => onSelectDate(item.iso)}
-                className={`sm:min-w-[60px] h-12 sm:h-14 rounded-xl flex flex-col items-center justify-center transition-colors border ${
+                className={`sm:min-w-[60px] h-12 sm:h-14 rounded-xl flex flex-col items-center justify-center transition-all ${
                   isSelected
-                    ? 'bg-slate-900 text-white border-slate-900'
+                    ? 'bg-zinc-950 text-white shadow-xs inset-ring inset-ring-white/10'
                     : isToday
-                    ? 'bg-emerald-50 text-emerald-900 border-emerald-300'
-                    : 'bg-slate-50/70 text-slate-700 border-slate-200/80 hover:bg-slate-100'
+                    ? 'bg-emerald-50 text-emerald-900 ring-1 ring-inset ring-emerald-600/25'
+                    : 'bg-zinc-50/80 text-zinc-700 ring-1 ring-inset ring-zinc-950/5 hover:bg-zinc-100'
                 }`}
               >
                 <span
                   className={`text-[9px] sm:text-[10px] font-medium leading-none truncate max-w-full px-0.5 ${
-                    isSelected ? 'text-slate-300' : 'text-slate-500'
+                    isSelected ? 'text-zinc-400' : 'text-zinc-500'
                   }`}
                 >
                   {item.weekdayShort}
@@ -343,25 +378,37 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             );
           })}
         </div>
+        {/* Locked Month Warning Banner */}
+        {isMonthLocked && (
+          <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 ring-1 ring-inset ring-amber-600/20 text-amber-900 text-xs font-semibold flex items-center gap-2">
+            <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+            <span>
+              ماه {PERSIAN_MONTHS[currentShamsi.jm - 1]} {toPersianDigits(currentShamsi.jy)} قفل شده
+              است؛ ثبت یا تغییر حضور در این تاریخ غیرفعال است.
+            </span>
+          </div>
+        )}
       </section>
 
       {/* Workers Attendance List */}
       {activeWorkers.length === 0 ? (
-        <div className="bg-white border border-slate-200/90 rounded-2xl p-8 text-center space-y-3">
-          <p className="text-sm font-semibold text-slate-600">
+        <div className="bg-white ring-1 ring-zinc-950/10 shadow-2xs rounded-2xl p-8 text-center space-y-3">
+          <p className="text-sm font-semibold text-zinc-600">
             هنوز هیچ کارگر فعالی در این پروژه ثبت نشده است.
           </p>
-          <button
-            type="button"
-            onClick={onOpenNewWorker}
-            className="h-10 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
-          >
-            <UserPlus className="w-4 h-4" />
-            <span>افزودن اولین کارگر</span>
-          </button>
+          {!isSupervisor && (
+            <button
+              type="button"
+              onClick={onOpenNewWorker}
+              className="h-10 px-4 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white shadow-xs inset-ring inset-ring-white/10 text-xs font-bold inline-flex items-center gap-1.5 transition-colors"
+            >
+              <UserPlus className="w-4 h-4 text-emerald-400" />
+              <span>افزودن اولین کارگر</span>
+            </button>
+          )}
         </div>
       ) : viewMode === 'row' ? (
-        <div className="bg-white border border-slate-200/90 rounded-2xl divide-y divide-slate-100 overflow-hidden">
+        <div className="bg-white ring-1 ring-zinc-950/10 shadow-2xs rounded-xl divide-y divide-zinc-950/5 overflow-hidden">
           {activeWorkers.map((worker, index) => {
             const avatarTone = AVATAR_TONES[index % AVATAR_TONES.length];
             const log = getWorkerLog(worker.id);
@@ -390,22 +437,22 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             return (
               <div
                 key={worker.id}
-                className="px-3 sm:px-4 py-2.5 sm:py-3 hover:bg-slate-50/70 transition-colors flex flex-col lg:flex-row lg:items-center justify-between gap-2 lg:gap-4"
+                className="px-3 sm:px-4 py-2.5 sm:py-3 hover:bg-zinc-50/70 transition-colors flex flex-col lg:flex-row lg:items-center justify-between gap-2 lg:gap-4"
               >
                 {/* Top Line on mobile / Left on desktop: Identity + (Mobile Overtime & Note) */}
                 <div className="flex items-center justify-between gap-2 min-w-0 flex-1">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <div
-                      className={`hidden sm:flex w-9 h-9 rounded-xl border ${avatarTone} font-extrabold text-xs items-center justify-center shrink-0`}
+                      className={`hidden sm:flex w-9 h-9 rounded-lg border ${avatarTone} font-extrabold text-xs items-center justify-center shrink-0`}
                     >
                       {worker.name.trim().charAt(0)}
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 min-w-0">
-                        <h3 className="text-[13px] sm:text-sm font-extrabold text-slate-900 truncate">
+                        <h3 className="text-[13px] sm:text-sm font-extrabold text-zinc-950 truncate">
                           {worker.name}
                         </h3>
-                        <span className="text-[11px] sm:text-xs text-slate-400 truncate shrink-0">
+                        <span className="text-[11px] sm:text-xs text-zinc-400 truncate shrink-0">
                           · {worker.role}
                         </span>
                       </div>
@@ -421,13 +468,13 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Mobile Overtime + Note (top-left of row, zero crowding with status bar) */}
+                  {/* Mobile Overtime + Note */}
                   <div className="flex lg:hidden items-center gap-1.5 font-mono-num shrink-0">
-                    <div className="flex items-center gap-0.5 bg-slate-50 border border-slate-200 rounded-lg p-0.5">
+                    <div className="flex items-center gap-0.5 bg-zinc-50 ring-1 ring-zinc-950/10 rounded-lg p-0.5">
                       <button
                         type="button"
                         onClick={() => handleOvertimeDelta(worker, -1)}
-                        disabled={currentOvertime <= 0}
+                        disabled={currentOvertime <= 0 || isMonthLocked}
                         title="کسر ۱ ساعت اضافه‌کار"
                         aria-label="کسر ۱ ساعت اضافه‌کار"
                         className="h-7 w-7 rounded-md hover:bg-rose-50 flex items-center justify-center text-rose-600 disabled:opacity-30 transition-colors"
@@ -436,16 +483,17 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       </button>
                       <span
                         title="ساعت اضافه‌کار"
-                        className="text-[11px] font-extrabold text-slate-800 px-1 min-w-[32px] text-center whitespace-nowrap"
+                        className="text-[11px] font-extrabold text-zinc-900 px-1 min-w-[32px] text-center whitespace-nowrap"
                       >
                         {toPersianDigits(currentOvertime)}س
                       </span>
                       <button
                         type="button"
                         onClick={() => handleOvertimeDelta(worker, 1)}
+                        disabled={isMonthLocked}
                         title="افزودن ۱ ساعت اضافه‌کار"
                         aria-label="افزودن ۱ ساعت اضافه‌کار"
-                        className="h-7 w-7 rounded-md hover:bg-emerald-50 flex items-center justify-center text-emerald-700 transition-colors"
+                        className="h-7 w-7 rounded-md hover:bg-emerald-50 flex items-center justify-center text-emerald-700 disabled:opacity-30 transition-colors"
                       >
                         <Plus className="w-3 h-3" />
                       </button>
@@ -458,8 +506,8 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       aria-label="یادداشت و پاداش روزانه"
                       className={`w-8 h-8 rounded-lg inline-flex items-center justify-center transition-colors ${
                         log?.note || log?.bonus_amount
-                          ? 'bg-emerald-700 text-white'
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          ? 'bg-zinc-950 text-white'
+                          : 'bg-white ring-1 ring-zinc-950/10 text-zinc-600 hover:bg-zinc-50'
                       }`}
                     >
                       <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -469,14 +517,15 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
                 {/* Line 2 on mobile (full-width 3-col bar) / Inline controls on desktop */}
                 <div className="flex items-center justify-between lg:justify-end gap-2.5">
-                  <div className="grid grid-cols-3 w-full lg:w-auto lg:inline-flex items-center bg-slate-100 p-1 rounded-xl gap-0.5 shrink-0">
+                  <div className="grid grid-cols-3 w-full lg:w-auto lg:inline-flex items-center bg-zinc-100 ring-1 ring-inset ring-zinc-950/5 p-0.5 rounded-lg gap-0.5 shrink-0">
                     <button
                       type="button"
+                      disabled={isMonthLocked}
                       onClick={() => handleQuickStatus(worker, 'present')}
-                      className={`h-8.5 lg:h-8 px-2.5 lg:px-3 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                      className={`h-8 lg:h-7.5 px-2.5 lg:px-3 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60 ${
                         currentStatus === 'present'
-                          ? 'bg-emerald-700 text-white shadow-2xs'
-                          : 'text-slate-600 hover:text-slate-900'
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : 'text-zinc-600 hover:text-zinc-950'
                       }`}
                     >
                       <span>حاضر</span>
@@ -484,11 +533,12 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
                     <button
                       type="button"
+                      disabled={isMonthLocked}
                       onClick={() => handleQuickStatus(worker, 'paid_leave')}
-                      className={`h-8.5 lg:h-8 px-2.5 lg:px-3 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                      className={`h-8 lg:h-7.5 px-2.5 lg:px-3 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60 ${
                         currentStatus === 'paid_leave'
-                          ? 'bg-sky-700 text-white shadow-2xs'
-                          : 'text-slate-600 hover:text-slate-900'
+                          ? 'bg-sky-600 text-white shadow-2xs'
+                          : 'text-zinc-600 hover:text-zinc-950'
                       }`}
                     >
                       <span>مرخصی</span>
@@ -496,13 +546,14 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
                     <button
                       type="button"
+                      disabled={isMonthLocked}
                       onClick={() => handleQuickStatus(worker, 'absent')}
-                      className={`h-8.5 lg:h-8 px-2.5 lg:px-3 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                      className={`h-8 lg:h-7.5 px-2.5 lg:px-3 rounded-md text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60 ${
                         currentStatus === 'absent'
                           ? isAutoFridayHoliday
                             ? 'bg-amber-600 text-white shadow-2xs'
                             : 'bg-rose-600 text-white shadow-2xs'
-                          : 'text-slate-600 hover:text-slate-900'
+                          : 'text-zinc-600 hover:text-zinc-950'
                       }`}
                     >
                       <span>{isAutoFridayHoliday ? 'تعطیل' : 'غایب'}</span>
@@ -511,29 +562,30 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
                   {/* Desktop Overtime Stepper + Note */}
                   <div className="hidden lg:flex items-center gap-2 font-mono-num shrink-0">
-                    <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-xl p-0.5">
+                    <div className="flex items-center gap-1 bg-zinc-50 ring-1 ring-zinc-950/10 rounded-lg p-0.5">
                       <button
                         type="button"
                         onClick={() => handleOvertimeDelta(worker, -1)}
-                        disabled={currentOvertime <= 0}
+                        disabled={currentOvertime <= 0 || isMonthLocked}
                         title="کسر ۱ ساعت اضافه‌کار"
                         aria-label="کسر ۱ ساعت اضافه‌کار"
-                        className="h-8 w-8 rounded-lg hover:bg-rose-50 flex items-center justify-center text-rose-600 disabled:opacity-30 transition-colors"
+                        className="h-7.5 w-7.5 rounded-md hover:bg-rose-50 flex items-center justify-center text-rose-600 disabled:opacity-30 transition-colors"
                       >
                         <Minus className="w-3.5 h-3.5" />
                       </button>
                       <span
                         title="ساعت اضافه‌کار"
-                        className="text-xs font-extrabold text-slate-800 px-1.5 min-w-[40px] text-center whitespace-nowrap"
+                        className="text-xs font-extrabold text-zinc-900 px-1.5 min-w-[40px] text-center whitespace-nowrap"
                       >
                         {toPersianDigits(currentOvertime)} س
                       </span>
                       <button
                         type="button"
                         onClick={() => handleOvertimeDelta(worker, 1)}
+                        disabled={isMonthLocked}
                         title="افزودن ۱ ساعت اضافه‌کار"
                         aria-label="افزودن ۱ ساعت اضافه‌کار"
-                        className="h-8 w-8 rounded-lg hover:bg-emerald-50 flex items-center justify-center text-emerald-700 transition-colors"
+                        className="h-7.5 w-7.5 rounded-md hover:bg-emerald-50 flex items-center justify-center text-emerald-700 disabled:opacity-30 transition-colors"
                       >
                         <Plus className="w-3.5 h-3.5" />
                       </button>
@@ -544,10 +596,10 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       onClick={() => handleToggleExpand(worker)}
                       title="یادداشت و پاداش روزانه"
                       aria-label="یادداشت و پاداش روزانه"
-                      className={`w-9 h-9 rounded-xl inline-flex items-center justify-center transition-colors ${
+                      className={`w-8.5 h-8.5 rounded-lg inline-flex items-center justify-center transition-colors ${
                         log?.note || log?.bonus_amount
-                          ? 'bg-emerald-700 text-white'
-                          : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          ? 'bg-zinc-950 text-white shadow-xs'
+                          : 'bg-white ring-1 ring-zinc-950/10 shadow-2xs text-zinc-600 hover:bg-zinc-50'
                       }`}
                     >
                       <SlidersHorizontal className="w-4 h-4" />
@@ -589,19 +641,19 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             return (
               <div
                 key={worker.id}
-                className="bg-white border border-slate-200/90 hover:border-slate-300 rounded-2xl p-3.5 sm:p-5 space-y-3 sm:space-y-4 transition-colors"
+                className="bg-white ring-1 ring-zinc-950/10 hover:ring-zinc-950/20 shadow-2xs rounded-xl p-3.5 sm:p-5 space-y-3 sm:space-y-4 transition-all"
               >
                 {/* Worker Header Row */}
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-3 min-w-0">
                     <div
-                      className={`hidden sm:flex w-10 h-10 rounded-xl border ${avatarTone} font-extrabold text-sm items-center justify-center shrink-0`}
+                      className={`hidden sm:flex w-10 h-10 rounded-lg border ${avatarTone} font-extrabold text-sm items-center justify-center shrink-0`}
                     >
                       {worker.name.trim().charAt(0)}
                     </div>
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5 flex-wrap">
-                        <h3 className="text-sm sm:text-base font-extrabold text-slate-900 truncate">
+                        <h3 className="text-sm sm:text-[15px] font-extrabold text-zinc-950 tracking-tight truncate">
                           {worker.name}
                         </h3>
                         {isAutoFridayHoliday && (
@@ -619,17 +671,23 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                             </span>
                           )}
                       </div>
-                      <div className="text-[11px] sm:text-xs text-slate-500 font-mono-num truncate mt-0.5">
-                        {worker.role} ·{' '}
-                        {worker.wage_type === 'daily'
-                          ? `روزمزد ${formatToman(worker.base_wage)} ت`
-                          : `ماهانه ${formatToman(worker.base_wage)} ت`}
+                      <div className="text-[11px] sm:text-xs text-zinc-500 font-mono-num truncate mt-0.5">
+                        {isSupervisor ? (
+                          <span>{worker.role}</span>
+                        ) : (
+                          <>
+                            {worker.role} ·{' '}
+                            {worker.wage_type === 'daily'
+                              ? `روزمزد ${formatToman(worker.base_wage)} ت`
+                              : `ماهانه ${formatToman(worker.base_wage)} ت`}
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {log && (
+                    {log && !isMonthLocked && (
                       <button
                         type="button"
                         onClick={() =>
@@ -641,7 +699,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                         }
                         title="بازنشانی روز"
                         aria-label="بازنشانی روز"
-                        className="h-8.5 w-8.5 sm:h-9 sm:w-9 rounded-xl bg-slate-100 text-slate-500 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center transition-colors"
+                        className="h-8.5 w-8.5 sm:h-9 sm:w-9 rounded-lg bg-white ring-1 ring-zinc-950/10 shadow-2xs text-zinc-500 hover:text-rose-600 hover:bg-rose-50 flex items-center justify-center transition-colors"
                       >
                         <RotateCcw className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       </button>
@@ -651,10 +709,10 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       onClick={() => handleToggleExpand(worker)}
                       title="یادداشت و پاداش روزانه"
                       aria-label="یادداشت و پاداش روزانه"
-                      className={`h-8.5 w-8.5 sm:h-9 sm:w-auto sm:px-3 rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                      className={`h-8.5 w-8.5 sm:h-9 sm:w-auto sm:px-3 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1.5 transition-colors ${
                         log?.note || log?.bonus_amount
-                          ? 'bg-emerald-700 text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                          ? 'bg-zinc-950 text-white shadow-xs inset-ring inset-ring-white/10'
+                          : 'bg-white ring-1 ring-zinc-950/10 shadow-2xs text-zinc-700 hover:bg-zinc-50'
                       }`}
                     >
                       <SlidersHorizontal className="w-3.5 h-3.5" />
@@ -664,14 +722,15 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 </div>
 
                 {/* Attendance 3-Way Segmented Control */}
-                <div className="grid grid-cols-3 gap-1 sm:gap-1.5 bg-slate-100 p-1 rounded-xl">
+                <div className="grid grid-cols-3 gap-1 bg-zinc-100 ring-1 ring-inset ring-zinc-950/5 p-1 rounded-xl">
                   <button
                     type="button"
+                    disabled={isMonthLocked}
                     onClick={() => handleQuickStatus(worker, 'present')}
-                    className={`min-h-[38px] sm:min-h-[36px] px-2 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                    className={`min-h-[36px] px-2 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60 ${
                       currentStatus === 'present'
-                        ? 'bg-emerald-700 text-white shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'bg-emerald-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                        : 'text-zinc-600 hover:text-zinc-950'
                     }`}
                   >
                     {currentStatus === 'present' && <Check className="w-3.5 h-3.5 shrink-0" />}
@@ -681,11 +740,12 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
                   <button
                     type="button"
+                    disabled={isMonthLocked}
                     onClick={() => handleQuickStatus(worker, 'paid_leave')}
-                    className={`min-h-[38px] sm:min-h-[36px] px-2 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                    className={`min-h-[36px] px-2 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60 ${
                       currentStatus === 'paid_leave'
-                        ? 'bg-sky-700 text-white shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'bg-sky-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                        : 'text-zinc-600 hover:text-zinc-950'
                     }`}
                   >
                     <span>مرخصی</span>
@@ -693,13 +753,14 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
 
                   <button
                     type="button"
+                    disabled={isMonthLocked}
                     onClick={() => handleQuickStatus(worker, 'absent')}
-                    className={`min-h-[38px] sm:min-h-[36px] px-2 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap ${
+                    className={`min-h-[36px] px-2 rounded-lg text-xs font-bold inline-flex items-center justify-center gap-1 transition-colors whitespace-nowrap disabled:opacity-60 ${
                       currentStatus === 'absent'
                         ? isAutoFridayHoliday
-                          ? 'bg-amber-600 text-white shadow-2xs'
-                          : 'bg-rose-600 text-white shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                          ? 'bg-amber-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                          : 'bg-rose-600 text-white shadow-xs inset-ring inset-ring-white/15'
+                        : 'text-zinc-600 hover:text-zinc-950'
                     }`}
                   >
                     <span className="sm:hidden">{isAutoFridayHoliday ? 'تعطیل' : 'غایب'}</span>
@@ -709,23 +770,23 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                   </button>
                 </div>
 
-                {/* Overtime Row + Accrued Footer (Single calm line on mobile) */}
-                <div className="flex items-center justify-between gap-2 pt-2.5 sm:pt-3 border-t border-slate-100 font-mono-num">
+                {/* Overtime Row + Accrued Footer */}
+                <div className="flex items-center justify-between gap-2 pt-2.5 sm:pt-3 border-t border-zinc-950/5 font-mono-num">
                   <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                    <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-400" />
-                    <span className="hidden sm:inline text-xs text-slate-600">اضافه‌کاری:</span>
-                    <div className="flex items-center gap-0.5 sm:gap-1 bg-slate-50 border border-slate-200 rounded-xl p-0.5">
+                    <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-zinc-400" />
+                    <span className="hidden sm:inline text-xs text-zinc-500">اضافه‌کاری:</span>
+                    <div className="flex items-center gap-0.5 sm:gap-1 bg-zinc-50 ring-1 ring-zinc-950/10 rounded-lg p-0.5">
                       <button
                         type="button"
                         onClick={() => handleOvertimeDelta(worker, -1)}
-                        disabled={currentOvertime <= 0}
+                        disabled={currentOvertime <= 0 || isMonthLocked}
                         title="کسر ۱ ساعت"
                         aria-label="کسر ۱ ساعت"
-                        className="h-8 w-8 rounded-lg hover:bg-rose-50 flex items-center justify-center text-rose-600 disabled:opacity-35 transition-colors"
+                        className="h-7.5 w-7.5 rounded-md bg-white hover:bg-rose-50 ring-1 ring-zinc-950/5 shadow-2xs flex items-center justify-center text-rose-600 disabled:opacity-35 transition-colors"
                       >
-                        <Minus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                        <Minus className="w-3.5 h-3.5" />
                       </button>
-                      <span className="text-xs font-extrabold text-slate-900 px-1 sm:px-1.5 min-w-[38px] sm:min-w-[46px] text-center whitespace-nowrap">
+                      <span className="text-xs font-extrabold text-zinc-950 px-1 sm:px-1.5 min-w-[38px] sm:min-w-[46px] text-center whitespace-nowrap">
                         {toPersianDigits(currentOvertime)}{' '}
                         <span className="sm:hidden">س</span>
                         <span className="hidden sm:inline">ساعت</span>
@@ -733,16 +794,17 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       <button
                         type="button"
                         onClick={() => handleOvertimeDelta(worker, 1)}
+                        disabled={isMonthLocked}
                         title="افزودن ۱ ساعت"
                         aria-label="افزودن ۱ ساعت"
-                        className="h-8 w-8 rounded-lg hover:bg-emerald-50 flex items-center justify-center text-emerald-700 transition-colors"
+                        className="h-7.5 w-7.5 rounded-md bg-white hover:bg-emerald-50 ring-1 ring-zinc-950/5 shadow-2xs flex items-center justify-center text-emerald-700 disabled:opacity-35 transition-colors"
                       >
-                        <Plus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+                        <Plus className="w-3.5 h-3.5" />
                       </button>
                     </div>
                   </div>
 
-                  {accrued && (
+                  {!isSupervisor && accrued && (
                     <button
                       type="button"
                       onClick={onOpenAccruedSheet}
@@ -765,24 +827,26 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
       {/* Date Jump Modal */}
       {showDateJump && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4"
+          className="fixed inset-0 z-50 bg-zinc-950/45 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4"
           onClick={() => setShowDateJump(false)}
         >
           <div
-            className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-sm w-full overflow-hidden shadow-xl"
+            className="bg-white ring-1 ring-zinc-950/10 rounded-t-3xl sm:rounded-2xl max-w-sm w-full overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="sm:hidden pt-2.5 pb-1 flex justify-center">
-              <span className="w-10 h-1 rounded-full bg-slate-300" />
+              <span className="w-10 h-1 rounded-full bg-zinc-300" />
             </div>
 
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100">
-              <h3 className="text-sm font-extrabold text-slate-900">انتخاب تاریخ روزانه</h3>
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-950/5">
+              <h3 className="text-sm font-extrabold text-zinc-950 tracking-tight">
+                انتخاب تاریخ روزانه
+              </h3>
               <button
                 type="button"
                 onClick={() => setShowDateJump(false)}
                 aria-label="بستن"
-                className="w-9 h-9 rounded-xl border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100"
+                className="w-9 h-9 rounded-lg ring-1 ring-zinc-950/10 bg-white flex items-center justify-center text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -791,11 +855,11 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
             <div className="p-5 space-y-4">
               <div className="grid grid-cols-3 gap-2.5">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">روز</label>
+                  <label className="block text-xs font-semibold text-zinc-600 mb-1.5">روز</label>
                   <select
                     value={jumpDay}
                     onChange={(e) => setJumpDay(Number(e.target.value))}
-                    className="w-full h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-mono-num font-bold"
+                    className="w-full h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-mono-num font-bold"
                   >
                     {Array.from(
                       { length: getShamsiMonthLength(jumpYear, jumpMonth) },
@@ -808,7 +872,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">ماه</label>
+                  <label className="block text-xs font-semibold text-zinc-600 mb-1.5">ماه</label>
                   <select
                     value={jumpMonth}
                     onChange={(e) => {
@@ -816,7 +880,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       setJumpMonth(nextM);
                       setJumpDay((prev) => Math.min(prev, getShamsiMonthLength(jumpYear, nextM)));
                     }}
-                    className="w-full h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold"
+                    className="w-full h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-bold"
                   >
                     {PERSIAN_MONTHS.map((m, idx) => (
                       <option key={m} value={idx + 1}>
@@ -826,7 +890,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-600 mb-1.5">سال</label>
+                  <label className="block text-xs font-semibold text-zinc-600 mb-1.5">سال</label>
                   <select
                     value={jumpYear}
                     onChange={(e) => {
@@ -834,7 +898,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                       setJumpYear(nextY);
                       setJumpDay((prev) => Math.min(prev, getShamsiMonthLength(nextY, jumpMonth)));
                     }}
-                    className="w-full h-11 sm:h-10 px-2.5 rounded-xl border border-slate-300 bg-white text-xs font-mono-num font-bold"
+                    className="w-full h-10 px-2.5 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs font-mono-num font-bold"
                   >
                     {jumpYearOptions.map((y) => (
                       <option key={y} value={y}>
@@ -845,11 +909,11 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="flex justify-end gap-2 pt-3 border-t border-zinc-950/5">
                 <button
                   type="button"
                   onClick={() => setShowDateJump(false)}
-                  className="h-10 px-4 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                  className="h-9.5 px-4 rounded-lg text-xs font-semibold text-zinc-600 hover:bg-zinc-100 transition-colors"
                 >
                   انصراف
                 </button>
@@ -861,7 +925,7 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                     onSelectDate(shamsiToIso(jumpYear, jumpMonth, safeD));
                     setShowDateJump(false);
                   }}
-                  className="h-10 px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors"
+                  className="h-9.5 px-5 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white shadow-xs inset-ring inset-ring-white/10 text-xs font-bold transition-colors"
                 >
                   تایید تاریخ
                 </button>
@@ -874,23 +938,23 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
       {/* Daily Note & Bonus Modal */}
       {expandedWorker && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4"
+          className="fixed inset-0 z-50 bg-zinc-950/45 backdrop-blur-xs flex items-end sm:items-center justify-center sm:p-4"
           onClick={() => setExpandedWorkerId(null)}
         >
           <div
-            className="bg-white border border-slate-200 rounded-t-3xl sm:rounded-2xl max-w-md w-full overflow-hidden shadow-xl"
+            className="bg-white ring-1 ring-zinc-950/10 rounded-t-3xl sm:rounded-2xl max-w-md w-full overflow-hidden shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="sm:hidden pt-2.5 pb-1 flex justify-center">
-              <span className="w-10 h-1 rounded-full bg-slate-300" />
+              <span className="w-10 h-1 rounded-full bg-zinc-300" />
             </div>
 
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-950/5">
               <div>
-                <h3 className="text-sm font-extrabold text-slate-900">
+                <h3 className="text-sm font-extrabold text-zinc-950 tracking-tight">
                   جزئیات روز — {expandedWorker.name}
                 </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-xs text-zinc-500 mt-0.5">
                   {formatShamsiDayMonth(selectedDate, true)}
                 </p>
               </div>
@@ -898,85 +962,93 @@ export const DailyAttendanceView: React.FC<DailyAttendanceViewProps> = ({
                 type="button"
                 onClick={() => setExpandedWorkerId(null)}
                 aria-label="بستن"
-                className="w-9 h-9 rounded-xl border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-100"
+                className="w-9 h-9 rounded-lg ring-1 ring-zinc-950/10 bg-white flex items-center justify-center text-zinc-500 hover:bg-zinc-50 hover:text-zinc-950 transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className={`grid ${isSupervisor ? 'grid-cols-1' : 'grid-cols-2'} gap-3`}>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
                     تعداد روز کاری
                   </label>
                   <input
                     type="number"
                     step="0.5"
                     min="0"
+                    disabled={isMonthLocked}
                     value={detailCustomDays}
                     onChange={(e) => setDetailCustomDays(e.target.value)}
-                    className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm font-mono-num"
+                    className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-sm font-mono-num disabled:opacity-60"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    پاداش / خرجی (تومان)
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    min="0"
-                    value={detailBonus}
-                    onChange={(e) => setDetailBonus(e.target.value)}
-                    placeholder="0"
-                    className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-sm font-mono-num"
-                  />
-                </div>
+                {!isSupervisor && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
+                      پاداش / خرجی (تومان)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0"
+                      disabled={isMonthLocked}
+                      value={detailBonus}
+                      onChange={(e) => setDetailBonus(e.target.value)}
+                      placeholder="0"
+                      className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-sm font-mono-num disabled:opacity-60"
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
                     پروژه / محل کار
                   </label>
                   <input
                     type="text"
+                    disabled={isMonthLocked}
                     value={detailProject}
                     onChange={(e) => setDetailProject(e.target.value)}
                     placeholder="مثلاً: پروژه نیاوران"
-                    className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm"
+                    className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs sm:text-sm disabled:opacity-60"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1.5">
                     توضیحات روز
                   </label>
                   <input
                     type="text"
+                    disabled={isMonthLocked}
                     value={detailNote}
                     onChange={(e) => setDetailNote(e.target.value)}
                     placeholder="مثلاً: سیمان‌کاری"
-                    className="w-full h-11 sm:h-10 px-3 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm"
+                    className="w-full h-10 px-3 rounded-lg border border-zinc-950/15 bg-white shadow-2xs text-xs sm:text-sm disabled:opacity-60"
                   />
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+              <div className="flex justify-end gap-2 pt-3 border-t border-zinc-950/5">
                 <button
                   type="button"
                   onClick={() => setExpandedWorkerId(null)}
-                  className="h-10 px-4 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100"
+                  className="h-9.5 px-4 rounded-lg text-xs font-semibold text-zinc-600 hover:bg-zinc-100 transition-colors"
                 >
-                  انصراف
+                  بستن
                 </button>
-                <button
-                  type="button"
-                  onClick={() => handleSaveDetails(expandedWorker)}
-                  className="h-10 px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors"
-                >
-                  ذخیره جزئیات
-                </button>
+                {!isMonthLocked && (
+                  <button
+                    type="button"
+                    onClick={() => handleSaveDetails(expandedWorker)}
+                    className="h-9.5 px-5 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-white shadow-xs inset-ring inset-ring-white/10 text-xs font-bold transition-colors"
+                  >
+                    ذخیره جزئیات
+                  </button>
+                )}
               </div>
             </div>
           </div>

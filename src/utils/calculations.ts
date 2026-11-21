@@ -2,6 +2,7 @@ import {
   AccruedToTodaySummary,
   DailyLog,
   PaymentRecord,
+  WageHistoryRecord,
   Worker,
   WorkerMonthlySummary,
 } from '../types';
@@ -43,11 +44,48 @@ export function countUnloggedFridaysBetween(
   return fridays;
 }
 
+function getEffectiveRateForDate(
+  iso: string,
+  worker: Worker,
+  sortedHistory: WageHistoryRecord[]
+): { dailyRate: number; overtimeRate: number } {
+  if (sortedHistory.length > 0) {
+    let matched: WageHistoryRecord | null = null;
+    for (let i = 0; i < sortedHistory.length; i++) {
+      if (sortedHistory[i].effective_date <= iso) {
+        matched = sortedHistory[i];
+      } else {
+        break;
+      }
+    }
+    if (matched) {
+      const dailyRate =
+        matched.wage_type === 'daily'
+          ? Number(matched.base_wage || 0)
+          : Number(matched.base_wage || 0) / 30;
+      return {
+        dailyRate,
+        overtimeRate: Number(matched.overtime_rate || 0),
+      };
+    }
+  }
+
+  const dailyRate =
+    worker.wage_type === 'daily'
+      ? Number(worker.base_wage || 0)
+      : Number(worker.base_wage || 0) / 30;
+  return {
+    dailyRate,
+    overtimeRate: Number(worker.overtime_rate || 0),
+  };
+}
+
 export function computeWorkerAccruedSummary(
   w: Worker,
   allLogs: DailyLog[],
   allPayments: PaymentRecord[],
-  todayIso: string
+  todayIso: string,
+  allWageHistory: WageHistoryRecord[] = []
 ): AccruedToTodaySummary {
   const todayShamsi = isoToShamsi(todayIso);
   const startDate: string = w.start_date || shamsiToIso(todayShamsi.jy, todayShamsi.jm, 1);
@@ -100,7 +138,11 @@ export function computeWorkerAccruedSummary(
   );
 
   const logsInCalcWindow = periodLogs.filter((l) => l.work_date <= targetEndIso);
-  const loggedDatesSet = new Set(logsInCalcWindow.map((l) => l.work_date));
+  const logByDate = new Map<string, DailyLog>();
+  for (const l of logsInCalcWindow) {
+    logByDate.set(l.work_date, l);
+  }
+  const loggedDatesSet = new Set(logByDate.keys());
 
   const unloggedFridays =
     !notStartedYet && isFridaysOffEnabled
@@ -146,44 +188,113 @@ export function computeWorkerAccruedSummary(
     (s, l) => s + Number(l.overtime_hours || 0),
     0
   );
-  const effectiveOvertimeHours =
-    w.manual_overtime_hours !== null && w.manual_overtime_hours !== undefined
-      ? Math.max(0, Number(w.manual_overtime_hours))
-      : loggedOvertimeHours;
+  const isOvertimeManuallyEdited =
+    w.manual_overtime_hours !== null && w.manual_overtime_hours !== undefined;
+  const effectiveOvertimeHours = isOvertimeManuallyEdited
+    ? Math.max(0, Number(w.manual_overtime_hours))
+    : loggedOvertimeHours;
 
   const bonusToToday = logsInCalcWindow.reduce(
     (s, l) => s + Number(l.bonus_amount || 0),
     0
   );
 
-  const dailyRate =
+  const workerHistory = allWageHistory
+    .filter((h) => h.worker_id === w.id)
+    .sort((a, b) => a.effective_date.localeCompare(b.effective_date));
+
+  const currentDailyRate =
     w.wage_type === 'daily'
       ? Number(w.base_wage || 0)
       : Number(w.base_wage || 0) / 30;
 
-  const baseEarnedToToday = Math.round(effectiveDaysToToday * dailyRate);
-  const overtimeEarnedToToday = Math.round(
-    effectiveOvertimeHours * Number(w.overtime_rate || 0)
-  );
+  let baseEarnedToToday = 0;
+  let overtimeEarnedToToday = 0;
+  let usedWageHistory = false;
+
+  if (workerHistory.length > 0 && !notStartedYet && !isDaysManuallyEdited) {
+    usedWageHistory = true;
+    const [y1, m1, d1] = startDate.split('-').map(Number);
+    const [y2, m2, d2] = targetEndIso.split('-').map(Number);
+    const cur = new Date(y1, m1 - 1, d1);
+    const end = new Date(y2, m2 - 1, d2);
+    let guard = 0;
+    let baseSum = 0;
+    let otSum = 0;
+
+    while (cur <= end && guard < 1500) {
+      const iso = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(
+        cur.getDate()
+      ).padStart(2, '0')}`;
+      const log = logByDate.get(iso);
+      const { dailyRate, overtimeRate } = getEffectiveRateForDate(iso, w, workerHistory);
+
+      let dayEquiv = 0;
+      if (log) {
+        dayEquiv = Number(log.days_equiv || 0);
+        if (!isOvertimeManuallyEdited) {
+          otSum += Number(log.overtime_hours || 0) * overtimeRate;
+        }
+      } else if (autoCount) {
+        const skipFriday = isFridaysOffEnabled && cur.getDay() === 5;
+        if (!skipFriday) {
+          dayEquiv = 1;
+        }
+      }
+
+      baseSum += dayEquiv * dailyRate;
+      cur.setDate(cur.getDate() + 1);
+      guard++;
+    }
+
+    if (manualAbsentDays > 0) {
+      baseSum = Math.max(0, baseSum - manualAbsentDays * currentDailyRate);
+    }
+
+    baseEarnedToToday = Math.round(baseSum);
+    overtimeEarnedToToday = isOvertimeManuallyEdited
+      ? Math.round(effectiveOvertimeHours * Number(w.overtime_rate || 0))
+      : Math.round(otSum);
+  } else {
+    baseEarnedToToday = Math.round(effectiveDaysToToday * currentDailyRate);
+    overtimeEarnedToToday = Math.round(
+      effectiveOvertimeHours * Number(w.overtime_rate || 0)
+    );
+  }
 
   const workerPaymentsToToday = allPayments.filter(
-    (p) => p.worker_id === w.id
+    (p) => p.worker_id === w.id && !p.period_archived
   );
 
   const deductionsToToday = workerPaymentsToToday
     .filter((p) => p.payment_type === 'deduction')
     .reduce((s, p) => s + Number(p.amount || 0), 0);
 
+  const extraAllowancesToToday = workerPaymentsToToday
+    .filter((p) => p.payment_type === 'allowance')
+    .reduce((s, p) => s + Number(p.amount || 0), 0);
+
   const paidToToday = workerPaymentsToToday
     .filter((p) => p.payment_type === 'advance' || p.payment_type === 'salary')
     .reduce((s, p) => s + Number(p.amount || 0), 0);
 
+  const fixedAllowance = Number(w.fixed_allowance || 0);
+  const fixedDeduction = Number(w.fixed_deduction || 0);
+  const carryOverBalance = Number(w.carry_over_balance || 0);
+
   const grossEarnedToToday =
-    baseEarnedToToday + overtimeEarnedToToday + bonusToToday - deductionsToToday;
-  const netPayableToToday = grossEarnedToToday - paidToToday;
+    baseEarnedToToday +
+    overtimeEarnedToToday +
+    bonusToToday +
+    fixedAllowance +
+    extraAllowancesToToday -
+    deductionsToToday -
+    fixedDeduction;
+
+  const netPayableToToday = grossEarnedToToday + carryOverBalance - paidToToday;
 
   const projectedRemainingWage =
-    remainingDaysToWork !== null ? Math.round(remainingDaysToWork * dailyRate) : null;
+    remainingDaysToWork !== null ? Math.round(remainingDaysToWork * currentDailyRate) : null;
 
   return {
     workerId: w.id,
@@ -209,11 +320,16 @@ export function computeWorkerAccruedSummary(
     baseEarnedToToday,
     overtimeEarnedToToday,
     bonusToToday,
+    fixedAllowance,
+    extraAllowancesToToday,
+    fixedDeduction,
     deductionsToToday,
+    carryOverBalance,
     grossEarnedToToday,
     paidToToday,
     netPayableToToday,
     projectedRemainingWage,
+    usedWageHistory,
     periodLogs,
   };
 }
@@ -224,7 +340,8 @@ export function computeWorkerMonthlySummary(
   allPayments: PaymentRecord[],
   shamsiYear: number,
   shamsiMonth: number,
-  todayIso: string
+  todayIso: string,
+  allWageHistory: WageHistoryRecord[] = []
 ): WorkerMonthlySummary {
   const monthFirstIso = shamsiToIso(shamsiYear, shamsiMonth, 1);
   const monthLen = getShamsiMonthLength(shamsiYear, shamsiMonth);
@@ -280,14 +397,17 @@ export function computeWorkerMonthlySummary(
   const absentCount = wLogs.filter((l) => l.status === 'absent').length;
   const leaveCount = wLogs.filter((l) => l.status === 'paid_leave').length;
 
-  const dailyRate =
-    w.wage_type === 'daily'
-      ? Number(w.base_wage || 0)
-      : Number(w.base_wage || 0) / 30;
+  const workerHistory = allWageHistory
+    .filter((h) => h.worker_id === w.id)
+    .sort((a, b) => a.effective_date.localeCompare(b.effective_date));
+  const refRate = getEffectiveRateForDate(activeRangeEnd || monthLastIso, w, workerHistory);
 
-  const baseEarned = Math.round(loggedDays * dailyRate);
-  const overtimeEarned = Math.round(loggedOvertime * Number(w.overtime_rate || 0));
-  const totalBonus = dailyBonuses;
+  const baseEarned = Math.round(loggedDays * refRate.dailyRate);
+  const overtimeEarned = Math.round(loggedOvertime * refRate.overtimeRate);
+  const allowances = wPayments
+    .filter((p) => p.payment_type === 'allowance')
+    .reduce((s, p) => s + Number(p.amount || 0), 0);
+  const totalBonus = dailyBonuses + allowances;
   const totalDeductions = wPayments
     .filter((p) => p.payment_type === 'deduction')
     .reduce((s, p) => s + Number(p.amount || 0), 0);

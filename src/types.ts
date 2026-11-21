@@ -4,6 +4,29 @@ export type AttendanceStatus = 'present' | 'half' | 'absent' | 'paid_leave';
 
 export type CalcMode = 'to_today' | 'full_range' | 'manual';
 
+export type UserRole = 'admin' | 'supervisor';
+
+export type PaymentType = 'advance' | 'salary' | 'deduction' | 'allowance';
+
+export interface CurrentUserInfo {
+  id: number;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  assignedProjectId: number | null;
+}
+
+export interface AppUser {
+  id: number;
+  username: string;
+  display_name: string;
+  role: UserRole;
+  assigned_project_id: number | null;
+  project_name?: string | null;
+  active: number;
+  created_at?: string;
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -15,26 +38,52 @@ export interface Project {
 
 export interface Worker {
   id: number;
-  project_id: number;                 // شناسه پروژه مربوطه
-  project_name?: string;              // نام پروژه
-  project_color?: string;             // رنگ پروژه
+  project_id: number;
+  project_name?: string;
+  project_color?: string;
   name: string;
   role: string;
   phone: string;
   wage_type: WageType;
   base_wage: number;
   overtime_rate: number;
-  start_date: string;                 // ISO date - تاریخ ورود (مثلاً ۵ مهر)
-  end_date: string | null;            // ISO date - تاریخ خروج (مثلاً ۲۳ آبان)
-  calc_mode: CalcMode;                // 'to_today' | 'full_range' | 'manual'
-  manual_worked_days: number | null;  // عدد دستی روزهای کارکرد (در صورت ویرایش مستقیم)
-  manual_absent_days: number;         // تعداد روز غیبت/کسری دستی
-  manual_overtime_hours: number | null; // ساعت اضافه‌کاری دستی
+  start_date: string;
+  end_date: string | null;
+  calc_mode: CalcMode;
+  manual_worked_days: number | null;
+  manual_absent_days: number;
+  manual_overtime_hours: number | null;
   auto_count_days: number;
-  fridays_off?: number;               // ۱ = تعطیلی خودکار جمعه‌ها (ویژه روزمزد)، ۰ = عادی
+  fridays_off?: number;
+  carry_over_balance?: number;         // مانده انتقالی از دوره/ماه قبل (مثبت: بستانکار، منفی: بدهکار)
+  fixed_allowance?: number;            // مزایای ثابت (حق غذا، ایاب‌وذهاب، حق مسئولیت)
+  fixed_allowance_label?: string;
+  fixed_deduction?: number;            // کسورات ثابت (بیمه، تعهدات)
+  fixed_deduction_label?: string;
   active: number;
   notes: string;
   created_at?: string;
+}
+
+export interface WageHistoryRecord {
+  id: number;
+  worker_id: number;
+  effective_date: string;
+  wage_type: WageType;
+  base_wage: number;
+  overtime_rate: number;
+  note: string;
+  created_at?: string;
+}
+
+export interface LockedMonthRecord {
+  id: number;
+  project_id: number;
+  shamsi_year: number;
+  shamsi_month: number;
+  locked_by: string;
+  locked_at: string;
+  note: string;
 }
 
 export interface AccruedToTodaySummary {
@@ -45,28 +94,33 @@ export interface AccruedToTodaySummary {
   calcMode: CalcMode;
   notStartedYet: boolean;
   isPeriodFinished: boolean;
-  calendarDaysElapsedToToday: number; // روزهای تقویمی از ورود تا امروز
-  remainingDaysToWork: number | null; // روزهای مانده از فردا تا تاریخ خروج
-  totalPeriodDays: number | null;     // کل روزهای بین تاریخ ورود تا تاریخ خروج
-  calendarAbsentDays: number;         // غیبت‌های ثبت‌شده در تقویم
-  manualAbsentDays: number;           // غیبت‌های کسرشده دستی
-  totalAbsentDays: number;            // مجموع غیبت‌ها
-  fridaysOffCount?: number;           // تعداد جمعه‌های تعطیل کسرشده
+  calendarDaysElapsedToToday: number;
+  remainingDaysToWork: number | null;
+  totalPeriodDays: number | null;
+  calendarAbsentDays: number;
+  manualAbsentDays: number;
+  totalAbsentDays: number;
+  fridaysOffCount?: number;
   halfDaysCount: number;
-  rawCalculatedDays: number;          // روز کارکرد طبق تقویم (قبل از عدد دستی)
-  effectiveDaysToToday: number;       // روز کارکرد نهایی (محاسبه‌شده یا ویرایش‌شده توسط کاربر)
+  rawCalculatedDays: number;
+  effectiveDaysToToday: number;
   isDaysManuallyEdited: boolean;
   loggedOvertimeHours: number;
   effectiveOvertimeHours: number;
   baseEarnedToToday: number;
   overtimeEarnedToToday: number;
   bonusToToday: number;
+  fixedAllowance: number;
+  extraAllowancesToToday: number;
+  fixedDeduction: number;
   deductionsToToday: number;
+  carryOverBalance: number;
   grossEarnedToToday: number;
   paidToToday: number;
   netPayableToToday: number;
   projectedRemainingWage: number | null;
-  periodLogs: DailyLog[];             // کلیه رکوردهای روزانه در بازه ورود تا خروج
+  usedWageHistory: boolean;
+  periodLogs: DailyLog[];
 }
 
 export interface DailyLog {
@@ -119,13 +173,48 @@ export interface PaymentRecord {
   shamsi_year: number;
   shamsi_month: number;
   amount: number;
-  payment_type: 'advance' | 'salary' | 'deduction';
+  payment_type: PaymentType;
+  category?: string;
+  receipt_path?: string;
+  period_archived?: number;
   note: string;
   created_at?: string;
 }
 
+export interface AuditLogRecord {
+  id: number;
+  actor_username: string;
+  actor_role: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  project_id: number | null;
+  summary: string;
+  details_json: string;
+  ip_address: string;
+  created_at: string;
+}
+
+export interface AutoBackupSettings {
+  enabled: boolean;
+  intervalHours: number;
+  keepCount: number;
+  telegramEnabled: boolean;
+  telegramChatId: string;
+  hasTelegramToken: boolean;
+  lastRunAt: string | null;
+  lastStatus: string | null;
+}
+
+export interface AutoBackupFile {
+  filename: string;
+  sizeKb: number;
+  createdAt: string;
+}
+
 export interface BootstrapResponse {
   todayIso: string;
+  currentUser: CurrentUserInfo;
   projects: Project[];
   workers: Worker[];
   dailyLogs?: DailyLog[];
@@ -135,5 +224,7 @@ export interface BootstrapResponse {
   accruedSummaries?: AccruedToTodaySummary[];
   payments?: PaymentRecord[];
   allPayments: PaymentRecord[];
+  wageHistory: WageHistoryRecord[];
+  lockedMonths: LockedMonthRecord[];
   dbFileSizeKb: number;
 }
